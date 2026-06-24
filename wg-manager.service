@@ -1,0 +1,18 @@
+[Unit]
+Description=WireGuard Manager API
+After=network-online.target awg-quick@awg0.service
+Wants=network-online.target awg-quick@awg0.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/boonker-nl/wg-manager
+EnvironmentFile=/opt/boonker-nl/wg-manager/.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
