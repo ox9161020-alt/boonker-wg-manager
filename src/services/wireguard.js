@@ -28,6 +28,24 @@ function removePeerFromRunning(publicKey) {
   if (result.status !== 0) throw new Error(result.stderr || 'Failed to remove peer');
 }
 
+function getDump() {
+  const result = spawnSync('awg', ['show', iface(), 'dump'], { encoding: 'utf8' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr || 'Failed to get AmneziaWG dump');
+  return result.stdout;
+}
+
+// `awg show <iface> dump` (machine-readable, tab-separated): first line is the
+// interface itself (privkey, pubkey, listen-port, fwmark) — skip it. Each peer
+// line: publicKey, presharedKey, endpoint, allowedIps, latestHandshake,
+// rxBytes, txBytes, persistentKeepalive. rx/tx are already raw bytes.
+function parsePeerDump(raw) {
+  return raw.trim().split('\n').slice(1).filter(Boolean).map((line) => {
+    const [publicKey, , , allowedIp, , rxBytes, txBytes] = line.split('\t');
+    return { publicKey, allowedIp, rx_bytes: parseInt(rxBytes, 10) || 0, tx_bytes: parseInt(txBytes, 10) || 0 };
+  });
+}
+
 // Units: B=1, KiB=1024, MiB=1048576, GiB=1073741824, TiB=1099511627776
 const UNIT_MAP = { B: 1, KiB: 1024, MiB: 1048576, GiB: 1073741824, TiB: 1099511627776 };
 
@@ -43,4 +61,4 @@ function parseTrafficBytes(raw) {
   return { rx_bytes: Math.round(rxTotal), tx_bytes: Math.round(txTotal) };
 }
 
-module.exports = { getStatus, addPeerToRunning, removePeerFromRunning, parseTrafficBytes };
+module.exports = { getStatus, addPeerToRunning, removePeerFromRunning, parseTrafficBytes, getDump, parsePeerDump };

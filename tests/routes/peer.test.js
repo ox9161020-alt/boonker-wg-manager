@@ -2,10 +2,12 @@
 jest.mock('../../src/services/config');
 jest.mock('../../src/services/wireguard');
 jest.mock('../../src/services/keygen');
+jest.mock('../../src/services/trafficControl');
 
 const configService = require('../../src/services/config');
 const wireguardService = require('../../src/services/wireguard');
 const keygenService = require('../../src/services/keygen');
+const trafficControlService = require('../../src/services/trafficControl');
 
 let app;
 
@@ -67,7 +69,7 @@ describe('POST /api/peer/create', () => {
     expect(body.data.config).toContain('[Interface]');
     expect(body.data.config).toContain('PrivateKey = client-priv-key');
     expect(body.data.config).toContain('PublicKey = server-pub-key');
-    expect(body.data.config).toContain('Endpoint = 127.0.0.1:51820');
+    expect(body.data.config).toContain('Endpoint = 1.2.3.4:51820');
     expect(body.data.config).toContain('AllowedIPs = 0.0.0.0/0, ::/0');
     expect(body.data.config).toContain('Jc = 4');
     expect(body.data.config).toContain('Jmin = 40');
@@ -77,6 +79,22 @@ describe('POST /api/peer/create', () => {
     expect(body.data.config).toContain('H1 = 11111111');
     expect(body.data.config).toContain('H4 = 44444444');
     expect(body.data.wstunnelServer).toBe('wss://1.2.3.4:443');
+  });
+
+  it('falls back to the 127.0.0.1/wstunnel endpoint when AWG_DIRECT_ENDPOINT=0', async () => {
+    process.env.AWG_DIRECT_ENDPOINT = '0';
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/peer/create',
+        headers: AUTH,
+        payload: { userId: 'user-123', deviceName: 'My Laptop' }
+      });
+      const body = JSON.parse(res.body);
+      expect(body.data.config).toContain('Endpoint = 127.0.0.1:51820');
+    } finally {
+      delete process.env.AWG_DIRECT_ENDPOINT;
+    }
   });
 
   it('calls addPeer and addPeerToRunning with correct args', async () => {
@@ -89,6 +107,17 @@ describe('POST /api/peer/create', () => {
 
     expect(configService.addPeer).toHaveBeenCalledWith('client-pub-key', '10.0.0.2/32', 'user-123', 'My Laptop');
     expect(wireguardService.addPeerToRunning).toHaveBeenCalledWith('client-pub-key', '10.0.0.2/32');
+  });
+
+  it('applies the speed limit for the newly allocated peer IP', async () => {
+    await app.inject({
+      method: 'POST',
+      url: '/api/peer/create',
+      headers: AUTH,
+      payload: { userId: 'user-123', deviceName: 'My Laptop' }
+    });
+
+    expect(trafficControlService.addPeerLimit).toHaveBeenCalledWith('10.0.0.2/32');
   });
 
   it('returns 400 when userId is missing', async () => {
@@ -177,6 +206,21 @@ describe('DELETE /api/peer/:pubkey/revoke', () => {
     expect(res.statusCode).toBe(500);
     expect(JSON.parse(res.body).error.code).toBe('WG_ERROR');
   });
+
+  it("removes the speed limit for the peer's allocated IP", async () => {
+    configService.parsePeers.mockReturnValue([
+      { publicKey: 'known-key', allowedIp: '10.0.0.9/32', userId: 'u1', deviceName: 'Laptop' }
+    ]);
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/peer/${encodeURIComponent('known-key')}/revoke`,
+      headers: AUTH
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(trafficControlService.removePeerLimit).toHaveBeenCalledWith('10.0.0.9/32');
+  });
 });
 
 describe('GET /api/peer/:pubkey/config', () => {
@@ -223,5 +267,69 @@ describe('GET /api/peer/:pubkey/config', () => {
 
     expect(res.statusCode).toBe(500);
     expect(JSON.parse(res.body).error.code).toBe('CONFIG_ERROR');
+  });
+});
+
+describe('POST /api/peer/restore', () => {
+  it('re-adds a peer with existing key and ip', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/peer/restore',
+      headers: AUTH,
+      payload: { publicKey: 'client-pub-key', allowedIp: '10.0.0.5/32', userId: 'u1', deviceName: 'Laptop' }
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.success).toBe(true);
+    expect(body.data.restored).toBe(true);
+    expect(configService.addPeer).toHaveBeenCalledWith('client-pub-key', '10.0.0.5/32', 'u1', 'Laptop');
+    expect(wireguardService.addPeerToRunning).toHaveBeenCalledWith('client-pub-key', '10.0.0.5/32');
+    expect(trafficControlService.addPeerLimit).toHaveBeenCalledWith('10.0.0.5/32');
+  });
+
+  it('is idempotent when the peer already exists', async () => {
+    configService.parsePeers.mockReturnValue([{ publicKey: 'client-pub-key', allowedIp: '10.0.0.7/32' }]);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/peer/restore',
+      headers: AUTH,
+      payload: { publicKey: 'client-pub-key', allowedIp: '10.0.0.5/32' }
+    });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data.restored).toBe(false);
+    // Must echo the peer's actual IP from the config, not the caller-supplied one
+    expect(body.data.allowedIp).toBe('10.0.0.7/32');
+    expect(configService.addPeer).not.toHaveBeenCalled();
+  });
+
+  it('defaults userId and deviceName to empty strings when omitted', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/peer/restore',
+      headers: AUTH,
+      payload: { publicKey: 'client-pub-key', allowedIp: '10.0.0.9/32' }
+    });
+    expect(res.statusCode).toBe(200);
+    expect(configService.addPeer).toHaveBeenCalledWith('client-pub-key', '10.0.0.9/32', '', '');
+  });
+
+  it('rejects when the ip is taken by another peer', async () => {
+    configService.parsePeers.mockReturnValue([{ publicKey: 'other-key', allowedIp: '10.0.0.5/32' }]);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/peer/restore',
+      headers: AUTH,
+      payload: { publicKey: 'client-pub-key', allowedIp: '10.0.0.5/32' }
+    });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).error.code).toBe('IP_IN_USE');
+  });
+
+  it('rejects missing params', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/api/peer/restore', headers: AUTH, payload: { publicKey: 'x' }
+    });
+    expect(res.statusCode).toBe(400);
   });
 });

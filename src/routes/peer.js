@@ -2,15 +2,21 @@
 const configService = require('../services/config');
 const wireguardService = require('../services/wireguard');
 const keygenService = require('../services/keygen');
+const trafficControlService = require('../services/trafficControl');
 const { withLock } = require('../services/lock');
 
 function buildClientConfig(privateKey, allowedIp, serverPublicKey) {
-  // Endpoint MUST be 127.0.0.1 so AWG goes through the local wstunnel client
-  // (which listens on UDP 127.0.0.1:51820 and forwards over WSS/TCP 443).
-  // Pointing AWG at the public IP would bypass wstunnel entirely and expose
-  // raw WireGuard traffic to DPI.
+  // wstunnel is currently disabled everywhere — Windows Smart App Control blocks the
+  // unsigned wstunnel.exe binary, see CLAUDE.md Этап 14 — so AWG must point straight
+  // at the server's public IP instead of the wstunnel-forwarded 127.0.0.1:<port>.
+  // Set AWG_DIRECT_ENDPOINT=0 to restore the 127.0.0.1/wstunnel path once wstunnel
+  // is code-signed and back in front of it.
+  const directEndpoint = process.env.AWG_DIRECT_ENDPOINT !== '0';
+  const endpointHost = directEndpoint ? process.env.SERVER_PUBLIC_IP : '127.0.0.1';
+
   const dns        = process.env.DNS_SERVER      || '10.0.0.1';
   const awgPort    = process.env.AWG_LOCAL_PORT  || '51820';
+  const mtu  = process.env.AWG_MTU  || '1280';
   const jc   = process.env.AWG_JC   || '4';
   const jmin = process.env.AWG_JMIN || '40';
   const jmax = process.env.AWG_JMAX || '70';
@@ -26,6 +32,7 @@ function buildClientConfig(privateKey, allowedIp, serverPublicKey) {
     `PrivateKey = ${privateKey}`,
     `Address = ${allowedIp}`,
     `DNS = ${dns}`,
+    `MTU = ${mtu}`,
     `Jc = ${jc}`,
     `Jmin = ${jmin}`,
     `Jmax = ${jmax}`,
@@ -38,7 +45,7 @@ function buildClientConfig(privateKey, allowedIp, serverPublicKey) {
     '',
     '[Peer]',
     `PublicKey = ${serverPublicKey}`,
-    `Endpoint = 127.0.0.1:${awgPort}`,
+    `Endpoint = ${endpointHost}:${awgPort}`,
     'AllowedIPs = 0.0.0.0/0, ::/0',
     'PersistentKeepalive = 25',
     ''
@@ -63,6 +70,7 @@ async function peerRoutes(fastify) {
 
         configService.addPeer(keys.publicKey, ip, userId, deviceName);
         wireguardService.addPeerToRunning(keys.publicKey, ip);
+        trafficControlService.addPeerLimit(ip);
 
         return { privateKey: keys.privateKey, publicKey: keys.publicKey, allowedIp: ip, serverPublicKey: srvPub };
       });
@@ -88,12 +96,48 @@ async function peerRoutes(fastify) {
     }
   });
 
+  fastify.post('/peer/restore', async (req, reply) => {
+    const { publicKey, allowedIp, userId, deviceName } = req.body || {};
+    if (!publicKey || !allowedIp) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'INVALID_PARAMS', message: 'publicKey and allowedIp are required' }
+      });
+    }
+    try {
+      const result = await withLock(() => {
+        const peers = configService.parsePeers(configService.readConfig());
+        const existing = peers.find(p => p.publicKey === publicKey);
+        // Idempotent: echo the peer's actual IP from the config, not the caller-supplied one
+        if (existing) return { restored: false, allowedIp: existing.allowedIp };
+        if (peers.find(p => p.allowedIp === allowedIp)) {
+          const err = new Error('IP already assigned to another peer');
+          err.code = 'IP_IN_USE';
+          throw err;
+        }
+        // Default to '' so a missing value never serializes as "undefined" in the peer comment
+        configService.addPeer(publicKey, allowedIp, userId || '', deviceName || '');
+        wireguardService.addPeerToRunning(publicKey, allowedIp);
+        trafficControlService.addPeerLimit(allowedIp);
+        return { restored: true, allowedIp };
+      });
+      return { success: true, data: { publicKey, allowedIp: result.allowedIp, restored: result.restored } };
+    } catch (err) {
+      if (err.code === 'IP_IN_USE') {
+        return reply.status(409).send({ success: false, error: { code: 'IP_IN_USE', message: err.message } });
+      }
+      return reply.status(500).send({ success: false, error: { code: 'WG_ERROR', message: err.message } });
+    }
+  });
+
   fastify.delete('/peer/:pubkey/revoke', async (req, reply) => {
     const pubkey = decodeURIComponent(req.params.pubkey);
     try {
       await withLock(() => {
+        const peer = configService.parsePeers(configService.readConfig()).find(p => p.publicKey === pubkey);
         configService.removePeer(pubkey);
         wireguardService.removePeerFromRunning(pubkey);
+        if (peer?.allowedIp) trafficControlService.removePeerLimit(peer.allowedIp);
       });
       return { success: true, data: {} };
     } catch (err) {

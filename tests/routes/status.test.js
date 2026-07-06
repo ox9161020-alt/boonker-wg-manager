@@ -70,3 +70,37 @@ describe('GET /api/peers', () => {
     expect(JSON.parse(res.body).error.code).toBe('CONFIG_ERROR');
   });
 });
+
+describe('GET /api/peers/traffic', () => {
+  it('joins per-peer transfer bytes (from awg dump) with userId/deviceName (from config)', async () => {
+    wireguardService.getDump.mockReturnValue('raw-dump');
+    wireguardService.parsePeerDump.mockReturnValue([
+      { publicKey: 'abc', allowedIp: '10.0.0.2/32', rx_bytes: 123, tx_bytes: 456 }
+    ]);
+    configService.readConfig.mockReturnValue('mock-config');
+    configService.parsePeers.mockReturnValue([
+      { publicKey: 'abc', allowedIp: '10.0.0.2/32', userId: 'u1', deviceName: 'Laptop' }
+    ]);
+
+    const res = await app.inject({ method: 'GET', url: '/api/peers/traffic', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      success: true,
+      data: {
+        peers: [
+          { publicKey: 'abc', allowedIp: '10.0.0.2/32', rx_bytes: 123, tx_bytes: 456, userId: 'u1', deviceName: 'Laptop' }
+        ]
+      }
+    });
+  });
+
+  it('returns an empty peers array (not 500) when the wg command fails, matching /api/traffic\'s tolerant convention', async () => {
+    wireguardService.getDump.mockImplementation(() => { throw new Error('awg not found'); });
+
+    const res = await app.inject({ method: 'GET', url: '/api/peers/traffic', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ success: true, data: { peers: [] } });
+  });
+});

@@ -1,6 +1,7 @@
 'use strict';
 require('dotenv').config();
 const buildApp = require('./src/app');
+const trafficControlService = require('./src/services/trafficControl');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -13,6 +14,16 @@ if (apiToken.length < 16 || apiToken.startsWith('change-me')) {
 }
 
 async function start() {
+  // Runs before the app accepts requests so the base qdisc/nftables setup
+  // exists by the time the first POST /peer/create lands. VPN connectivity
+  // must never depend on QoS bootstrap succeeding, so failures are logged,
+  // not fatal.
+  try {
+    trafficControlService.ensureTrafficControlBase();
+  } catch (err) {
+    console.error('[trafficControl] bootstrap failed — starting anyway:', err.message);
+  }
+
   const app = await buildApp();
   try {
     await app.listen({ port: PORT, host: '0.0.0.0' });
@@ -22,4 +33,6 @@ async function start() {
   }
 }
 
-start();
+if (require.main === module) start();
+
+module.exports = { start };
