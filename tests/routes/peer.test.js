@@ -282,6 +282,7 @@ describe('POST /api/peer/restore', () => {
     const body = JSON.parse(res.body);
     expect(body.success).toBe(true);
     expect(body.data.restored).toBe(true);
+    expect(body.data.serverPublicKey).toBe('server-pub-key');
     expect(configService.addPeer).toHaveBeenCalledWith('client-pub-key', '10.0.0.5/32', 'u1', 'Laptop');
     expect(wireguardService.addPeerToRunning).toHaveBeenCalledWith('client-pub-key', '10.0.0.5/32');
     expect(trafficControlService.addPeerLimit).toHaveBeenCalledWith('10.0.0.5/32');
@@ -300,6 +301,7 @@ describe('POST /api/peer/restore', () => {
     expect(body.data.restored).toBe(false);
     // Must echo the peer's actual IP from the config, not the caller-supplied one
     expect(body.data.allowedIp).toBe('10.0.0.7/32');
+    expect(body.data.serverPublicKey).toBe('server-pub-key');
     expect(configService.addPeer).not.toHaveBeenCalled();
   });
 

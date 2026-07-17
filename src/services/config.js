@@ -56,10 +56,19 @@ function parsePeers(configContent) {
   return peers;
 }
 
+function getPeerRangeBase() {
+  // Non-overlapping peer ranges per node (Этап B) — falls back to the legacy
+  // hardcoded 10.0.0.0/24 shared by every node before this env var existed, so
+  // already-provisioned nodes need no .env change to keep working.
+  const cidr = process.env.PEER_IP_RANGE || '10.0.0.0/24';
+  return cidr.split('/')[0].split('.').map(Number).slice(0, 3);
+}
+
 function allocateIp(peers) {
   const used = new Set(peers.map(p => p.allowedIp?.split('/')[0]).filter(Boolean));
+  const [a, b, c] = getPeerRangeBase();
   for (let i = 2; i <= 254; i++) {
-    const ip = `10.0.0.${i}`;
+    const ip = `${a}.${b}.${c}.${i}`;
     if (!used.has(ip)) return `${ip}/32`;
   }
   throw new Error('No available IP addresses');

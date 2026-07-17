@@ -82,6 +82,14 @@ describe('allocateIp', () => {
     const peers = [{ allowedIp: '10.0.0.2/32' }, { allowedIp: '10.0.0.4/32' }];
     expect(configService.allocateIp(peers)).toBe('10.0.0.3/32');
   });
+
+  it('allocates from PEER_IP_RANGE instead of the legacy 10.0.0.0/24 when set', () => {
+    process.env.PEER_IP_RANGE = '10.0.5.0/24';
+    jest.resetModules();
+    const scopedConfigService = require('../../src/services/config');
+    expect(scopedConfigService.allocateIp([])).toBe('10.0.5.2/32');
+    delete process.env.PEER_IP_RANGE;
+  });
 });
 
 describe('addPeer', () => {

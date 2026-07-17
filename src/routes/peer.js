@@ -108,8 +108,9 @@ async function peerRoutes(fastify) {
       const result = await withLock(() => {
         const peers = configService.parsePeers(configService.readConfig());
         const existing = peers.find(p => p.publicKey === publicKey);
+        const serverPublicKey = configService.getServerPublicKey();
         // Idempotent: echo the peer's actual IP from the config, not the caller-supplied one
-        if (existing) return { restored: false, allowedIp: existing.allowedIp };
+        if (existing) return { restored: false, allowedIp: existing.allowedIp, serverPublicKey };
         if (peers.find(p => p.allowedIp === allowedIp)) {
           const err = new Error('IP already assigned to another peer');
           err.code = 'IP_IN_USE';
@@ -119,9 +120,12 @@ async function peerRoutes(fastify) {
         configService.addPeer(publicKey, allowedIp, userId || '', deviceName || '');
         wireguardService.addPeerToRunning(publicKey, allowedIp);
         trafficControlService.addPeerLimit(allowedIp);
-        return { restored: true, allowedIp };
+        return { restored: true, allowedIp, serverPublicKey };
       });
-      return { success: true, data: { publicKey, allowedIp: result.allowedIp, restored: result.restored } };
+      return {
+        success: true,
+        data: { publicKey, allowedIp: result.allowedIp, restored: result.restored, serverPublicKey: result.serverPublicKey },
+      };
     } catch (err) {
       if (err.code === 'IP_IN_USE') {
         return reply.status(409).send({ success: false, error: { code: 'IP_IN_USE', message: err.message } });
