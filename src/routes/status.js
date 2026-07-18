@@ -1,12 +1,22 @@
 'use strict';
 const wireguardService = require('../services/wireguard');
 const configService = require('../services/config');
+const xrayConfig = require('../services/xrayConfig');
+
+function getVlessStatus() {
+  if (!xrayConfig.isAvailable()) return { available: false };
+  try {
+    return { available: true, ...xrayConfig.getRealityPublicParams(), userCount: xrayConfig.listClients().length };
+  } catch (err) {
+    return { available: false };
+  }
+}
 
 async function statusRoutes(fastify) {
   fastify.get('/status', async (req, reply) => {
     try {
       const raw = wireguardService.getStatus();
-      return { success: true, data: { raw } };
+      return { success: true, data: { raw, vless: getVlessStatus() } };
     } catch (err) {
       return reply.status(500).send({
         success: false,

@@ -4,6 +4,7 @@ const authHook = require('./middleware/auth');
 const healthRoutes = require('./routes/health');
 const peerRoutes = require('./routes/peer');
 const statusRoutes = require('./routes/status');
+const vlessRoutes = require('./routes/vless');
 
 async function buildApp() {
   const fastify = Fastify({ logger: process.env.NODE_ENV !== 'test' });
@@ -14,6 +15,7 @@ async function buildApp() {
     api.addHook('onRequest', authHook);
     api.register(peerRoutes);
     api.register(statusRoutes);
+    api.register(vlessRoutes);
   }, { prefix: '/api' });
 
   return fastify;

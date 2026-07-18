@@ -1,9 +1,11 @@
 'use strict';
 jest.mock('../../src/services/wireguard');
 jest.mock('../../src/services/config');
+jest.mock('../../src/services/xrayConfig');
 
 const wireguardService = require('../../src/services/wireguard');
 const configService = require('../../src/services/config');
+const xrayConfig = require('../../src/services/xrayConfig');
 
 let app;
 
@@ -18,12 +20,13 @@ afterAll(() => app.close());
 
 beforeEach(() => {
   jest.clearAllMocks();
+  xrayConfig.isAvailable.mockReturnValue(false);
 });
 
 const AUTH = { Authorization: 'Bearer test-token' };
 
 describe('GET /api/status', () => {
-  it('returns raw wg show output', async () => {
+  it('returns raw wg show output plus vless availability', async () => {
     wireguardService.getStatus.mockReturnValue('interface: wg0\npublic key: abc\n');
 
     const res = await app.inject({ method: 'GET', url: '/api/status', headers: AUTH });
@@ -31,7 +34,23 @@ describe('GET /api/status', () => {
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({
       success: true,
-      data: { raw: 'interface: wg0\npublic key: abc\n' }
+      data: { raw: 'interface: wg0\npublic key: abc\n', vless: { available: false } }
+    });
+  });
+
+  it('includes Reality public params and user count when Xray is installed', async () => {
+    wireguardService.getStatus.mockReturnValue('interface: wg0\n');
+    xrayConfig.isAvailable.mockReturnValue(true);
+    xrayConfig.getRealityPublicParams.mockReturnValue({
+      publicKey: 'pub-key', sni: 'www.samsung.com', shortId: 'abc123', port: '443'
+    });
+    xrayConfig.listClients.mockReturnValue([{ uuid: 'u1' }, { uuid: 'u2' }]);
+
+    const res = await app.inject({ method: 'GET', url: '/api/status', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data.vless).toEqual({
+      available: true, publicKey: 'pub-key', sni: 'www.samsung.com', shortId: 'abc123', port: '443', userCount: 2
     });
   });
 
