@@ -2,6 +2,13 @@
 const fs = require('fs');
 
 const VLESS_TAG = 'vless-in';
+// Real-world Reality clients (Happ included) default to Vision when importing a
+// Reality profile — an account without this flow gets its connection accepted at
+// the TLS/Reality layer (looks "connected") but immediately ended by Xray at the
+// VLESS layer ("is not able to use the flow xtls-rprx-vision"), which reads as
+// "connected but no internet". Found live 2026-07-18 testing Happ on Android; the
+// Этап 1 local xray-cli client never hit this because it didn't request a flow.
+const CLIENT_FLOW = 'xtls-rprx-vision';
 
 const getConfigPath = () => process.env.XRAY_CONFIG_PATH || '/usr/local/etc/xray/config.json';
 
@@ -40,7 +47,7 @@ function listClients() {
 function addClient(uuid, userId, deviceName) {
   const config = readConfig();
   const inbound = findVlessInbound(config);
-  inbound.settings.clients.push({ id: uuid, email: buildEmail(userId || '', deviceName || '') });
+  inbound.settings.clients.push({ id: uuid, email: buildEmail(userId || '', deviceName || ''), flow: CLIENT_FLOW });
   writeConfig(config);
 }
 
@@ -70,6 +77,7 @@ function buildVlessUri(uuid, label) {
     sid,
     fp: 'chrome',
     type: 'tcp',
+    flow: CLIENT_FLOW,
     encryption: 'none',
   });
   return `vless://${uuid}@${host}:${port}?${params.toString()}#${encodeURIComponent(label || '')}`;
@@ -86,6 +94,7 @@ function getRealityPublicParams() {
 
 module.exports = {
   VLESS_TAG,
+  CLIENT_FLOW,
   isAvailable,
   readConfig,
   writeConfig,

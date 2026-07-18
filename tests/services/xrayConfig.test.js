@@ -73,6 +73,15 @@ describe('addClient', () => {
     expect(xrayConfig.listClients()).toHaveLength(3);
     expect(xrayConfig.findClient('uuid-ccc')).toEqual({ uuid: 'uuid-ccc', userId: 'user-3', deviceName: 'Tablet' });
   });
+
+  it('sets the xtls-rprx-vision flow real Reality clients (e.g. Happ) expect', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.addClient('uuid-ccc', 'user-3', 'Tablet');
+
+    const raw = xrayConfig.readConfig();
+    const client = raw.inbounds.find((i) => i.tag === 'vless-in').settings.clients.find((c) => c.id === 'uuid-ccc');
+    expect(client.flow).toBe(xrayConfig.CLIENT_FLOW);
+  });
 });
 
 describe('removeClient', () => {
@@ -103,7 +112,7 @@ describe('buildVlessUri', () => {
 
     expect(uri).toBe(
       'vless://uuid-aaa@1.2.3.4:443?security=reality&pbk=pub-key&sni=www.samsung.com' +
-      '&sid=abc123&fp=chrome&type=tcp&encryption=none#My%20Laptop'
+      '&sid=abc123&fp=chrome&type=tcp&flow=xtls-rprx-vision&encryption=none#My%20Laptop'
     );
   });
 });

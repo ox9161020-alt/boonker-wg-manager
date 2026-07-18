@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { VLESS_TAG } = require('./xrayConfig');
+const { VLESS_TAG, CLIENT_FLOW } = require('./xrayConfig');
 
 const apiAddr = () => process.env.XRAY_API_ADDR || '127.0.0.1:10085';
 const xrayBin = () => process.env.XRAY_BIN || '/usr/local/bin/xray';
@@ -26,7 +26,7 @@ function addClientToRunning(uuid, email) {
         listen: '0.0.0.0',
         port: Number(listenPort()),
         protocol: 'vless',
-        settings: { clients: [{ id: uuid, email }], decryption: 'none' },
+        settings: { clients: [{ id: uuid, email, flow: CLIENT_FLOW }], decryption: 'none' },
       },
     ],
   };
