@@ -46,7 +46,12 @@ function buildClientConfig(privateKey, allowedIp, serverPublicKey) {
     '[Peer]',
     `PublicKey = ${serverPublicKey}`,
     `Endpoint = ${endpointHost}:${awgPort}`,
-    'AllowedIPs = 0.0.0.0/0, ::/0',
+    // IPv4-only by design: the node never gets an IPv6 address or ip6tables NAT
+    // (see provisioner.js), so advertising `::/0` here used to just claim routing
+    // we couldn't actually provide. Verified live 2026-07-20 there was no leak
+    // (clients simply have no IPv6 to route), but dropped anyway to stop claiming
+    // a route that doesn't exist.
+    'AllowedIPs = 0.0.0.0/0',
     'PersistentKeepalive = 25',
     ''
   ].join('\n');

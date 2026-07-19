@@ -75,7 +75,11 @@ function buildVlessUri(uuid, label) {
     pbk,
     sni,
     sid,
-    fp: 'chrome',
+    // fp=chrome gets the Reality handshake actively dropped in the wild (confirmed
+    // live 2026-07-20: identical link, only fp swapped, went from 0 to instant
+    // connectivity in Happ over a real RU network) — firefox is not similarly
+    // targeted. See VLESS_Reality.md for the full multi-session investigation.
+    fp: 'firefox',
     type: 'tcp',
     flow: CLIENT_FLOW,
     encryption: 'none',

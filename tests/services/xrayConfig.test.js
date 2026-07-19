@@ -112,7 +112,7 @@ describe('buildVlessUri', () => {
 
     expect(uri).toBe(
       'vless://uuid-aaa@1.2.3.4:443?security=reality&pbk=pub-key&sni=www.samsung.com' +
-      '&sid=abc123&fp=chrome&type=tcp&flow=xtls-rprx-vision&encryption=none#My%20Laptop'
+      '&sid=abc123&fp=firefox&type=tcp&flow=xtls-rprx-vision&encryption=none#My%20Laptop'
     );
   });
 });
