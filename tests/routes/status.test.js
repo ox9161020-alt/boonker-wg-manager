@@ -2,10 +2,12 @@
 jest.mock('../../src/services/wireguard');
 jest.mock('../../src/services/config');
 jest.mock('../../src/services/xrayConfig');
+jest.mock('../../src/services/xrayProcess');
 
 const wireguardService = require('../../src/services/wireguard');
 const configService = require('../../src/services/config');
 const xrayConfig = require('../../src/services/xrayConfig');
+const xrayProcess = require('../../src/services/xrayProcess');
 
 let app;
 
@@ -118,6 +120,61 @@ describe('GET /api/peers/traffic', () => {
     wireguardService.getDump.mockImplementation(() => { throw new Error('awg not found'); });
 
     const res = await app.inject({ method: 'GET', url: '/api/peers/traffic', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ success: true, data: { peers: [] } });
+  });
+});
+
+describe('GET /api/vless/traffic', () => {
+  it('joins per-client stats (keyed by email) with the client list (keyed by uuid), returning publicKey=uuid like AWG peers', async () => {
+    xrayConfig.isAvailable.mockReturnValue(true);
+    xrayConfig.buildEmail.mockImplementation((userId, deviceName) => `${userId} | ${deviceName}`);
+    xrayConfig.listClients.mockReturnValue([
+      { uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'iPhone' },
+    ]);
+    xrayProcess.getClientTraffic.mockReturnValue([
+      { email: 'user-123 | iPhone', rx_bytes: 300, tx_bytes: 700 },
+    ]);
+
+    const res = await app.inject({ method: 'GET', url: '/api/vless/traffic', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      success: true,
+      data: { peers: [{ publicKey: 'uuid-aaa', rx_bytes: 300, tx_bytes: 700 }] },
+    });
+  });
+
+  it('drops a stats entry whose email has no matching client (e.g. a just-revoked user)', async () => {
+    xrayConfig.isAvailable.mockReturnValue(true);
+    xrayConfig.buildEmail.mockImplementation((userId, deviceName) => `${userId} | ${deviceName}`);
+    xrayConfig.listClients.mockReturnValue([]);
+    xrayProcess.getClientTraffic.mockReturnValue([
+      { email: 'ghost-user | Old Phone', rx_bytes: 300, tx_bytes: 700 },
+    ]);
+
+    const res = await app.inject({ method: 'GET', url: '/api/vless/traffic', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ success: true, data: { peers: [] } });
+  });
+
+  it('returns an empty peers array when Xray is not installed on this node', async () => {
+    xrayConfig.isAvailable.mockReturnValue(false);
+
+    const res = await app.inject({ method: 'GET', url: '/api/vless/traffic', headers: AUTH });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ success: true, data: { peers: [] } });
+    expect(xrayProcess.getClientTraffic).not.toHaveBeenCalled();
+  });
+
+  it('returns an empty peers array (not 500) when the xray CLI call fails, matching /api/peers/traffic\'s tolerant convention', async () => {
+    xrayConfig.isAvailable.mockReturnValue(true);
+    xrayProcess.getClientTraffic.mockImplementation(() => { throw new Error('xray api unreachable'); });
+
+    const res = await app.inject({ method: 'GET', url: '/api/vless/traffic', headers: AUTH });
 
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body)).toEqual({ success: true, data: { peers: [] } });

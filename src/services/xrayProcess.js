@@ -71,4 +71,49 @@ function runRmu(email) {
   }
 }
 
-module.exports = { addClientToRunning, removeClientFromRunning, restartService };
+// `policy.levels["0"].statsUserUplink/Downlink` (set on every node's Xray
+// config since the VLESS backfill step) makes Xray track per-client byte
+// counters internally — this just reads them out via the same `xray api`
+// CLI already used above for adu/rmu. Never pass `-reset`: the traffic poller
+// diffs these against a stored baseline exactly like it diffs `awg show
+// dump`'s cumulative counters (see wireguard.js) — resetting here would break
+// that math.
+function queryStats() {
+  const result = spawnSync(xrayBin(), ['api', 'statsquery', `--server=${apiAddr()}`, '-pattern=user>>>'], { encoding: 'utf8' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr || 'xray api statsquery failed');
+  return result.stdout;
+}
+
+// Stat names look like "user>>>EMAIL>>>traffic>>>uplink". EMAIL is
+// "userId | deviceName" (xrayConfig.buildEmail) and can contain almost
+// anything, so match the fixed ">>>traffic>>>{uplink,downlink}" suffix
+// instead of naively splitting the whole name on ">>>".
+function parseStats(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw || '{}');
+  } catch {
+    return [];
+  }
+  const byEmail = new Map();
+  for (const { name, value } of parsed.stat || []) {
+    const match = /^user>>>(.+)>>>traffic>>>(uplink|downlink)$/.exec(name || '');
+    if (!match) continue;
+    const [, email, direction] = match;
+    const entry = byEmail.get(email) || { email, rx_bytes: 0, tx_bytes: 0 };
+    // Xray's "uplink" = client → server (server receives), matching the
+    // `rx_bytes` convention already used for AWG peers via `awg show dump`
+    // (see wireguard.js) — "downlink" = server → client = tx_bytes.
+    if (direction === 'uplink') entry.rx_bytes = parseInt(value, 10) || 0;
+    else entry.tx_bytes = parseInt(value, 10) || 0;
+    byEmail.set(email, entry);
+  }
+  return [...byEmail.values()];
+}
+
+function getClientTraffic() {
+  return parseStats(queryStats());
+}
+
+module.exports = { addClientToRunning, removeClientFromRunning, restartService, getClientTraffic, parseStats };
