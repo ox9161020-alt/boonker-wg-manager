@@ -17,7 +17,12 @@ const SAMPLE_CONFIG = {
         decryption: 'none'
       }
     }
-  ]
+  ],
+  outbounds: [
+    { protocol: 'freedom', tag: 'direct' },
+    { protocol: 'dns', tag: 'dns-out' },
+  ],
+  routing: { rules: [{ type: 'field', inboundTag: ['api'], outboundTag: 'api' }] },
 };
 
 let tempDir, configPath, xrayConfig;
@@ -114,6 +119,94 @@ describe('buildVlessUri', () => {
       'vless://uuid-aaa@1.2.3.4:443?security=reality&pbk=pub-key&sni=www.samsung.com' +
       '&sid=abc123&fp=firefox&type=tcp&flow=xtls-rprx-vision&encryption=none#My%20Laptop'
     );
+  });
+});
+
+describe('ensureTierOutbounds', () => {
+  it('adds the 1/3/5 tier outbounds with their marks when missing', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    const changed = xrayConfig.ensureTierOutbounds();
+
+    expect(changed).toBe(true);
+    const raw = xrayConfig.readConfig();
+    expect(raw.outbounds.find((o) => o.tag === 'tier-101').streamSettings.sockopt.mark).toBe(101);
+    expect(raw.outbounds.find((o) => o.tag === 'tier-103').streamSettings.sockopt.mark).toBe(103);
+    expect(raw.outbounds.find((o) => o.tag === 'tier-105').streamSettings.sockopt.mark).toBe(105);
+  });
+
+  it('is idempotent — does not duplicate outbounds or report a change on a second call', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.ensureTierOutbounds();
+    const changed = xrayConfig.ensureTierOutbounds();
+
+    expect(changed).toBe(false);
+    const raw = xrayConfig.readConfig();
+    expect(raw.outbounds.filter((o) => o.tag === 'tier-101')).toHaveLength(1);
+  });
+});
+
+describe('setUserSpeedTier / removeUserSpeedTier', () => {
+  it('adds a user-tagged routing rule pointing at the tier outbound', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    const result = xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 3);
+
+    expect(result).toEqual({ ruleTag: 'user-uuid-aaa', outboundTag: 'tier-103', mark: 103 });
+    const raw = xrayConfig.readConfig();
+    const rule = raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-aaa');
+    expect(rule).toEqual({ type: 'field', user: ['user-1 | Laptop'], outboundTag: 'tier-103', ruleTag: 'user-uuid-aaa' });
+  });
+
+  it('replaces the previous rule instead of duplicating it when the tier changes', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
+    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 5);
+
+    const raw = xrayConfig.readConfig();
+    const rules = raw.routing.rules.filter((r) => r.ruleTag === 'user-uuid-aaa');
+    expect(rules).toHaveLength(1);
+    expect(rules[0].outboundTag).toBe('tier-105');
+  });
+
+  it('does not touch other rules (base rules or other users)', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
+    xrayConfig.setUserSpeedTier('uuid-bbb', 'user-2 | Phone', 5);
+
+    const raw = xrayConfig.readConfig();
+    expect(raw.routing.rules.find((r) => r.outboundTag === 'api')).toBeDefined();
+    expect(raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-aaa').outboundTag).toBe('tier-101');
+    expect(raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-bbb').outboundTag).toBe('tier-105');
+  });
+
+  it('removes only the named user\'s rule and returns the ruleTag', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
+
+    const removed = xrayConfig.removeUserSpeedTier('uuid-aaa');
+
+    expect(removed).toBe('user-uuid-aaa');
+    const raw = xrayConfig.readConfig();
+    expect(raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-aaa')).toBeUndefined();
+    expect(raw.routing.rules.find((r) => r.outboundTag === 'api')).toBeDefined();
+  });
+
+  it('returns null (no-op) when the user never had a tier rule — avoids a needless hot-remove/restart', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    expect(xrayConfig.removeUserSpeedTier('uuid-never-tiered')).toBeNull();
+  });
+});
+
+describe('getMarkForEmail', () => {
+  it('resolves an email to its tier outbound\'s mark', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 5);
+
+    expect(xrayConfig.getMarkForEmail('user-1 | Laptop')).toBe(105);
+  });
+
+  it('returns null when the user has no tier rule', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    expect(xrayConfig.getMarkForEmail('user-1 | Laptop')).toBeNull();
   });
 });
 

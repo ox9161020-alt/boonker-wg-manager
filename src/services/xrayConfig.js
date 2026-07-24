@@ -1,5 +1,6 @@
 'use strict';
 const fs = require('fs');
+const speedTiers = require('./xraySpeedTiers');
 
 const VLESS_TAG = 'vless-in';
 // Real-world Reality clients (Happ included) default to Vision when importing a
@@ -96,6 +97,72 @@ function getRealityPublicParams() {
   };
 }
 
+// Idempotently makes sure every speed tier has its marked freedom outbound in
+// the on-disk config — safe to call on every request, and doubles as the
+// backfill path for nodes provisioned before this feature existed (see
+// ROADMAP_AWG-VLESS.md Этап 1).
+function ensureTierOutbounds() {
+  const config = readConfig();
+  config.outbounds = config.outbounds || [];
+  let changed = false;
+  for (const tier of speedTiers.listTiers()) {
+    const tag = speedTiers.outboundTag(tier);
+    if (!config.outbounds.find((o) => o.tag === tag)) {
+      config.outbounds.push({
+        protocol: 'freedom',
+        tag,
+        streamSettings: { sockopt: { mark: speedTiers.markFor(tier) } },
+      });
+      changed = true;
+    }
+  }
+  if (changed) writeConfig(config);
+  return changed;
+}
+
+// Assigns (or re-assigns, on an upgrade/downgrade) a user's speed tier by
+// writing a `user`-matched routing rule tagged with their own ruleTag, so it
+// can later be removed in isolation via `xray api rmrules` without touching
+// anyone else's rule or the base api/dns-out rules. Only patches the on-disk
+// file — the caller (xrayProcess) is responsible for hot-applying via
+// `adrules`, exactly like addClientToRunning() does for client adds.
+function setUserSpeedTier(uuid, email, tier) {
+  ensureTierOutbounds();
+  const config = readConfig();
+  const ruleTag = speedTiers.ruleTagFor(uuid);
+  const outboundTag = speedTiers.outboundTag(tier);
+  config.routing.rules = (config.routing.rules || []).filter((r) => r.ruleTag !== ruleTag);
+  config.routing.rules.push({ type: 'field', user: [email], outboundTag, ruleTag });
+  writeConfig(config);
+  return { ruleTag, outboundTag, mark: speedTiers.markFor(tier) };
+}
+
+// Returns the ruleTag only if a rule actually existed (null otherwise) so
+// callers don't hot-remove a rule that was never applied — most users won't
+// have a speed tier assigned at all yet, and rmrules on an unknown tag would
+// needlessly trigger the restart fallback in removeRoutingRuleFromRunning().
+function removeUserSpeedTier(uuid) {
+  const config = readConfig();
+  const ruleTag = speedTiers.ruleTagFor(uuid);
+  const before = (config.routing.rules || []).length;
+  config.routing.rules = (config.routing.rules || []).filter((r) => r.ruleTag !== ruleTag);
+  if (config.routing.rules.length === before) return null;
+  writeConfig(config);
+  return ruleTag;
+}
+
+// Used by the access-log tailer (xrayAccessLog.js) to resolve a connection's
+// `email` (from Xray's own "accepted ... email: X" log line) to the fw mark
+// its tier's outbound carries, so the download-direction leg can be marked
+// too — see the D1 research-spike finding in ROADMAP_AWG-VLESS.md Этап 1.
+function getMarkForEmail(email) {
+  const config = readConfig();
+  const rule = (config.routing.rules || []).find((r) => Array.isArray(r.user) && r.user.includes(email));
+  if (!rule) return null;
+  const outbound = (config.outbounds || []).find((o) => o.tag === rule.outboundTag);
+  return outbound?.streamSettings?.sockopt?.mark ?? null;
+}
+
 module.exports = {
   VLESS_TAG,
   CLIENT_FLOW,
@@ -110,4 +177,8 @@ module.exports = {
   buildEmail,
   parseEmail,
   getRealityPublicParams,
+  ensureTierOutbounds,
+  setUserSpeedTier,
+  removeUserSpeedTier,
+  getMarkForEmail,
 };

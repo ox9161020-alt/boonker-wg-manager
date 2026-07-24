@@ -10,8 +10,18 @@ const notAvailable = (reply) => reply.status(503).send({
 });
 
 async function vlessRoutes(fastify) {
+  // Applies (or updates, on an upgrade/downgrade) a user's speed-tier routing
+  // rule — used by both create and restore so a tier change never needs a
+  // fresh UUID (ROADMAP_AWG-VLESS.md Этап 1). No-op when speedTier is absent.
+  function applySpeedTier(uuid, email, speedTier) {
+    if (speedTier == null) return null;
+    const { ruleTag, outboundTag, mark } = xrayConfig.setUserSpeedTier(uuid, email, speedTier);
+    xrayProcess.addRoutingRuleToRunning(ruleTag, email, outboundTag);
+    return { speedTier, mark };
+  }
+
   fastify.post('/vless/user/create', async (req, reply) => {
-    const { userId, deviceName } = req.body || {};
+    const { userId, deviceName, speedTier } = req.body || {};
     if (!userId || !deviceName) {
       return reply.status(400).send({
         success: false,
@@ -21,12 +31,13 @@ async function vlessRoutes(fastify) {
     if (!xrayConfig.isAvailable()) return notAvailable(reply);
 
     try {
-      const uuid = await withLock(() => {
+      const { uuid, tier } = await withLock(() => {
         const id = crypto.randomUUID();
         const email = xrayConfig.buildEmail(userId, deviceName);
         xrayConfig.addClient(id, userId, deviceName);
         xrayProcess.addClientToRunning(id, email);
-        return id;
+        const appliedTier = applySpeedTier(id, email, speedTier);
+        return { uuid: id, tier: appliedTier };
       });
 
       return {
@@ -35,6 +46,7 @@ async function vlessRoutes(fastify) {
           uuid,
           vlessUri: xrayConfig.buildVlessUri(uuid, deviceName),
           reality: xrayConfig.getRealityPublicParams(),
+          ...(tier ? { speedTier: tier.speedTier } : {}),
         }
       };
     } catch (err) {
@@ -43,7 +55,7 @@ async function vlessRoutes(fastify) {
   });
 
   fastify.post('/vless/user/restore', async (req, reply) => {
-    const { uuid, userId, deviceName } = req.body || {};
+    const { uuid, userId, deviceName, speedTier } = req.body || {};
     if (!uuid) {
       return reply.status(400).send({
         success: false,
@@ -53,15 +65,29 @@ async function vlessRoutes(fastify) {
     if (!xrayConfig.isAvailable()) return notAvailable(reply);
 
     try {
-      const restored = await withLock(() => {
-        if (xrayConfig.findClient(uuid)) return false;
-        const email = xrayConfig.buildEmail(userId || '', deviceName || '');
-        xrayConfig.addClient(uuid, userId || '', deviceName || '');
-        xrayProcess.addClientToRunning(uuid, email);
-        return true;
+      const { restored, tier } = await withLock(() => {
+        const existing = xrayConfig.findClient(uuid);
+        const email = existing
+          ? xrayConfig.buildEmail(existing.userId, existing.deviceName)
+          : xrayConfig.buildEmail(userId || '', deviceName || '');
+        if (!existing) {
+          xrayConfig.addClient(uuid, userId || '', deviceName || '');
+          xrayProcess.addClientToRunning(uuid, email);
+        }
+        // Applied whether the client was just (re)created or already existed
+        // — this IS the tier-change path for an active subscription, no
+        // fresh UUID needed (ROADMAP_AWG-VLESS.md Этап 1).
+        const appliedTier = applySpeedTier(uuid, email, speedTier);
+        return { restored: !existing, tier: appliedTier };
       });
 
-      return { success: true, data: { uuid, restored, reality: xrayConfig.getRealityPublicParams() } };
+      return {
+        success: true,
+        data: {
+          uuid, restored, reality: xrayConfig.getRealityPublicParams(),
+          ...(tier ? { speedTier: tier.speedTier } : {}),
+        }
+      };
     } catch (err) {
       return reply.status(500).send({ success: false, error: { code: 'VLESS_ERROR', message: err.message } });
     }
@@ -77,6 +103,8 @@ async function vlessRoutes(fastify) {
         if (!existing) throw Object.assign(new Error('VLESS client not found'), { code: 'VLESS_USER_NOT_FOUND' });
         xrayConfig.removeClient(uuid);
         xrayProcess.removeClientFromRunning(xrayConfig.buildEmail(existing.userId, existing.deviceName));
+        const ruleTag = xrayConfig.removeUserSpeedTier(uuid);
+        if (ruleTag) xrayProcess.removeRoutingRuleFromRunning(ruleTag);
       });
       return { success: true, data: {} };
     } catch (err) {

@@ -71,6 +71,49 @@ function runRmu(email) {
   }
 }
 
+// `xray api adrules`/`rmrules` hot-patch the routing table with NO restart at
+// all (confirmed live — see ROADMAP_AWG-VLESS.md Этап 1), unlike adu/rmu they
+// print a bare "{}" on success instead of a human-readable confirmation
+// string, so success is read off the exit code instead of stdout matching.
+// `-append` is required: without it `adrules` REPLACES the entire routing
+// table instead of adding to it (confirmed via an isolated throwaway xray
+// instance, not assumed from docs alone).
+function addRoutingRuleToRunning(ruleTag, email, outboundTag) {
+  const miniConfig = { routing: { rules: [{ type: 'field', user: [email], outboundTag, ruleTag }] } };
+  const tmpFile = path.join(os.tmpdir(), `xray-adrules-${ruleTag}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify(miniConfig), 'utf8');
+  try {
+    runAdrules(tmpFile);
+  } catch (err) {
+    // Same fallback rationale as addClientToRunning(): the file already has
+    // the rule (xrayConfig.setUserSpeedTier runs before this), so a restart
+    // picks it up without losing the change.
+    restartService();
+  } finally {
+    fs.unlinkSync(tmpFile);
+  }
+}
+
+function runAdrules(tmpFile) {
+  const result = spawnSync(xrayBin(), ['api', 'adrules', `--server=${apiAddr()}`, '-append', tmpFile], { encoding: 'utf8' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr || 'xray api adrules failed');
+}
+
+function removeRoutingRuleFromRunning(ruleTag) {
+  try {
+    runRmrules(ruleTag);
+  } catch (err) {
+    restartService();
+  }
+}
+
+function runRmrules(ruleTag) {
+  const result = spawnSync(xrayBin(), ['api', 'rmrules', `--server=${apiAddr()}`, ruleTag], { encoding: 'utf8' });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(result.stderr || 'xray api rmrules failed');
+}
+
 // `policy.levels["0"].statsUserUplink/Downlink` (set on every node's Xray
 // config since the VLESS backfill step) makes Xray track per-client byte
 // counters internally — this just reads them out via the same `xray api`
@@ -116,4 +159,12 @@ function getClientTraffic() {
   return parseStats(queryStats());
 }
 
-module.exports = { addClientToRunning, removeClientFromRunning, restartService, getClientTraffic, parseStats };
+module.exports = {
+  addClientToRunning,
+  removeClientFromRunning,
+  restartService,
+  getClientTraffic,
+  parseStats,
+  addRoutingRuleToRunning,
+  removeRoutingRuleFromRunning,
+};

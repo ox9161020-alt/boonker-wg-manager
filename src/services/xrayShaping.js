@@ -1,0 +1,104 @@
+'use strict';
+const { spawnSync } = require('child_process');
+const fs = require('fs');
+const speedTiers = require('./xraySpeedTiers');
+
+const NFT_TABLE = 'boonker_vless_shape';
+const NFT_RULESET_PATH = '/tmp/boonker-vless-shape.conf';
+// How long a (client_ip, client_port) → mark mapping survives in the nftables
+// map without being refreshed by a newer access-log line for the same
+// connection. Generous on purpose — this only feeds a SPEED LIMIT, not a
+// security control, so a stale entry lingering a bit past a closed connection
+// is harmless (that port simply won't see matching traffic again).
+const DL_MARK_TTL_SECONDS = 120;
+
+const publicIface = () => process.env.PUBLIC_IFACE || '';
+
+function sh(cmd, args, extraOpts) {
+  const result = spawnSync(cmd, args, { encoding: 'utf8', ...extraOpts });
+  if (result.error) {
+    console.error(`[xrayShaping] failed to run "${cmd}": ${result.error.message}`);
+  } else if (result.status !== 0 && result.stderr) {
+    console.error(`[xrayShaping] "${cmd} ${args.join(' ')}" exited ${result.status}: ${result.stderr.trim()}`);
+  }
+  return result;
+}
+
+function removeTierFilter(tier) {
+  const iface = publicIface();
+  const prio = String(speedTiers.prioFor(tier));
+  sh('tc', ['filter', 'del', 'dev', iface, 'parent', '1:0', 'protocol', 'ip', 'prio', prio]);
+}
+
+// One filter per tier handles BOTH directions: Xray's own `sockopt.mark` tags
+// the upload leg (outbound to the real site) directly, while the download
+// leg gets the same mark via the `dl_mark` nftables map (see
+// ensureNftablesShapingTable below) — confirmed live, see
+// ROADMAP_AWG-VLESS.md Этап 1.
+function addTierFilter(tier) {
+  const iface = publicIface();
+  const prio = String(speedTiers.prioFor(tier));
+  // `handle` takes a plain decimal fwmark value — confirmed live (tc's own
+  // `tc filter show` just displays it back in hex, e.g. 100 -> 0x64).
+  const mark = String(speedTiers.markFor(tier));
+  const rate = `${speedTiers.rateMbitFor(tier)}mbit`;
+
+  removeTierFilter(tier); // idempotent: clear any stale filter at this prio first
+
+  sh('tc', ['filter', 'add', 'dev', iface, 'parent', '1:0', 'protocol', 'ip', 'prio', prio,
+    'handle', mark, 'fw',
+    'police', 'rate', rate, 'burst', '32k', 'drop', 'flowid', '1:1']);
+}
+
+function ensureNftablesShapingTable() {
+  // Recreated on every call, same idiom as trafficControl.js's
+  // ensureNftablesLimitTable — cheap, and picks up a changed TTL/table shape
+  // on restart without needing a diff.
+  sh('nft', ['delete', 'table', 'inet', NFT_TABLE]);
+  const script = [
+    `table inet ${NFT_TABLE} {`,
+    '  map dl_mark {',
+    '    type ipv4_addr . inet_service : mark',
+    `    timeout ${DL_MARK_TTL_SECONDS}s`,
+    '  }',
+    '  chain postrouting {',
+    '    type filter hook postrouting priority mangle; policy accept;',
+    '    meta mark set ip daddr . tcp sport map @dl_mark',
+    '  }',
+    '}',
+  ].join('\n');
+  fs.writeFileSync(NFT_RULESET_PATH, script, 'utf8');
+  sh('nft', ['-f', NFT_RULESET_PATH]);
+}
+
+// Idempotent — safe to call on every wg-manager start, same contract as
+// trafficControl.js's ensureTrafficControlBase(). Non-fatal by convention:
+// the caller (server.js) logs and continues on failure rather than refusing
+// to boot, since VPN connectivity must never depend on QoS bootstrap.
+function ensureVlessShapingBase() {
+  const iface = publicIface();
+  if (!iface) {
+    console.error('[xrayShaping] PUBLIC_IFACE is not set — skipping VLESS shaping bootstrap');
+    return;
+  }
+
+  // Standard "replace root with classful prio" idiom — confirmed live on the
+  // test node's actual public interface (ens18, started as kernel-default
+  // `mq`) with zero SSH/connectivity disruption.
+  sh('tc', ['qdisc', 'replace', 'dev', iface, 'root', 'handle', '1:', 'prio']);
+
+  ensureNftablesShapingTable();
+
+  for (const tier of speedTiers.listTiers()) addTierFilter(tier);
+}
+
+// Called by the access-log tailer (xrayAccessLog.js) for every newly-accepted
+// connection belonging to a tiered user — marks the client-facing (download)
+// leg by (ip, port) so the SAME tc filter that already catches the upload
+// leg's Xray-set mark also catches this one.
+function markClientConnection(ip, port, mark) {
+  sh('nft', ['add', 'element', 'inet', NFT_TABLE, 'dl_mark',
+    `{ ${ip} . ${port} timeout ${DL_MARK_TTL_SECONDS}s : ${mark} }`]);
+}
+
+module.exports = { ensureVlessShapingBase, addTierFilter, removeTierFilter, markClientConnection, DL_MARK_TTL_SECONDS };

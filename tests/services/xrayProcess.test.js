@@ -2,6 +2,7 @@
 jest.mock('child_process');
 
 const { spawnSync } = require('child_process');
+const fs = require('fs');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -54,6 +55,66 @@ describe('getClientTraffic', () => {
     const { getClientTraffic } = require('../../src/services/xrayProcess');
 
     expect(() => getClientTraffic()).toThrow('xray not installed');
+  });
+});
+
+describe('addRoutingRuleToRunning', () => {
+  it('calls xray api adrules with -append and the mini routing config, matching by ruleTag', () => {
+    spawnSync.mockReturnValue({ stdout: '{}', stderr: '', status: 0, error: null });
+    // The temp file is written then unlinked within the same call, same as
+    // addClientToRunning's adu payload — spy on the write to inspect content
+    // before it's cleaned up, instead of reading it back afterward.
+    const writeSpy = jest.spyOn(fs, 'writeFileSync');
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.addRoutingRuleToRunning('user-uuid-aaa', 'user-1 | Laptop', 'tier-103');
+
+    const call = spawnSync.mock.calls.find((c) => c[1][1] === 'adrules');
+    expect(call[0]).toBe('/usr/local/bin/xray');
+    expect(call[1]).toEqual(expect.arrayContaining(['api', 'adrules', '--server=127.0.0.1:10085', '-append']));
+
+    const written = JSON.parse(writeSpy.mock.calls[0][1]);
+    expect(written).toEqual({
+      routing: { rules: [{ type: 'field', user: ['user-1 | Laptop'], outboundTag: 'tier-103', ruleTag: 'user-uuid-aaa' }] },
+    });
+    writeSpy.mockRestore();
+  });
+
+  it('falls back to a full restart when the hot-apply fails', () => {
+    spawnSync
+      .mockReturnValueOnce({ stdout: '', stderr: 'connection refused', status: 1, error: null }) // adrules
+      .mockReturnValueOnce({ stdout: '', stderr: '', status: 0, error: null }); // systemctl restart
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.addRoutingRuleToRunning('user-uuid-aaa', 'user-1 | Laptop', 'tier-103');
+
+    expect(spawnSync).toHaveBeenCalledWith('systemctl', ['restart', 'xray'], { encoding: 'utf8' });
+  });
+});
+
+describe('removeRoutingRuleFromRunning', () => {
+  it('calls xray api rmrules with the ruleTag', () => {
+    spawnSync.mockReturnValue({ stdout: '{}', stderr: '', status: 0, error: null });
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.removeRoutingRuleFromRunning('user-uuid-aaa');
+
+    expect(spawnSync).toHaveBeenCalledWith(
+      '/usr/local/bin/xray',
+      ['api', 'rmrules', '--server=127.0.0.1:10085', 'user-uuid-aaa'],
+      { encoding: 'utf8' }
+    );
+  });
+
+  it('falls back to a full restart when the hot-remove fails', () => {
+    spawnSync
+      .mockReturnValueOnce({ stdout: '', stderr: 'rule not found', status: 1, error: null }) // rmrules
+      .mockReturnValueOnce({ stdout: '', stderr: '', status: 0, error: null }); // systemctl restart
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.removeRoutingRuleFromRunning('user-uuid-aaa');
+
+    expect(spawnSync).toHaveBeenCalledWith('systemctl', ['restart', 'xray'], { encoding: 'utf8' });
   });
 });
 

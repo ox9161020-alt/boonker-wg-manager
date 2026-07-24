@@ -26,6 +26,7 @@ beforeEach(() => {
   });
   xrayConfig.addClient.mockReturnValue(undefined);
   xrayConfig.removeClient.mockReturnValue(undefined);
+  xrayConfig.removeUserSpeedTier.mockReturnValue(null);
   xrayProcess.addClientToRunning.mockReturnValue(undefined);
   xrayProcess.removeClientFromRunning.mockReturnValue(undefined);
 });
@@ -86,6 +87,30 @@ describe('POST /api/vless/user/create', () => {
     expect(res.statusCode).toBe(500);
     expect(JSON.parse(res.body).error.code).toBe('VLESS_ERROR');
   });
+
+  it('applies a speed tier when speedTier is provided', async () => {
+    xrayConfig.setUserSpeedTier.mockReturnValue({ ruleTag: 'user-mock-uuid', outboundTag: 'tier-103', mark: 103 });
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/create', headers: AUTH,
+      payload: { userId: 'user-123', deviceName: 'My Laptop', speedTier: 3 }
+    });
+
+    const body = JSON.parse(res.body);
+    expect(body.data.speedTier).toBe(3);
+    expect(xrayConfig.setUserSpeedTier).toHaveBeenCalledWith(body.data.uuid, 'user-123 | My Laptop', 3);
+    expect(xrayProcess.addRoutingRuleToRunning).toHaveBeenCalledWith('user-mock-uuid', 'user-123 | My Laptop', 'tier-103');
+  });
+
+  it('does not touch speed-tier routing when speedTier is omitted', async () => {
+    await app.inject({
+      method: 'POST', url: '/api/vless/user/create', headers: AUTH,
+      payload: { userId: 'user-123', deviceName: 'My Laptop' }
+    });
+
+    expect(xrayConfig.setUserSpeedTier).not.toHaveBeenCalled();
+    expect(xrayProcess.addRoutingRuleToRunning).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/vless/user/restore', () => {
@@ -127,6 +152,23 @@ describe('POST /api/vless/user/restore', () => {
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body).error.code).toBe('INVALID_PARAMS');
   });
+
+  it('applies a speed tier even when the client already existed — this IS the tier-change path, no fresh UUID needed', async () => {
+    xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
+    xrayConfig.setUserSpeedTier.mockReturnValue({ ruleTag: 'user-uuid-aaa', outboundTag: 'tier-105', mark: 105 });
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/restore', headers: AUTH,
+      payload: { uuid: 'uuid-aaa', speedTier: 5 }
+    });
+
+    const body = JSON.parse(res.body);
+    expect(body.data.restored).toBe(false);
+    expect(body.data.speedTier).toBe(5);
+    expect(xrayConfig.addClient).not.toHaveBeenCalled();
+    expect(xrayConfig.setUserSpeedTier).toHaveBeenCalledWith('uuid-aaa', 'user-123 | My Laptop', 5);
+    expect(xrayProcess.addRoutingRuleToRunning).toHaveBeenCalledWith('user-uuid-aaa', 'user-123 | My Laptop', 'tier-105');
+  });
 });
 
 describe('DELETE /api/vless/user/:uuid/revoke', () => {
@@ -158,6 +200,25 @@ describe('DELETE /api/vless/user/:uuid/revoke', () => {
 
     expect(res.statusCode).toBe(503);
     expect(JSON.parse(res.body).error.code).toBe('VLESS_NOT_AVAILABLE');
+  });
+
+  it('also removes the speed-tier routing rule when one exists', async () => {
+    xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
+    xrayConfig.removeUserSpeedTier.mockReturnValue('user-uuid-aaa');
+
+    await app.inject({ method: 'DELETE', url: '/api/vless/user/uuid-aaa/revoke', headers: AUTH });
+
+    expect(xrayConfig.removeUserSpeedTier).toHaveBeenCalledWith('uuid-aaa');
+    expect(xrayProcess.removeRoutingRuleFromRunning).toHaveBeenCalledWith('user-uuid-aaa');
+  });
+
+  it('skips the hot-remove when the user never had a tier rule', async () => {
+    xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
+    xrayConfig.removeUserSpeedTier.mockReturnValue(null);
+
+    await app.inject({ method: 'DELETE', url: '/api/vless/user/uuid-aaa/revoke', headers: AUTH });
+
+    expect(xrayProcess.removeRoutingRuleFromRunning).not.toHaveBeenCalled();
   });
 });
 

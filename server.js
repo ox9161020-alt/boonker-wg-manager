@@ -2,6 +2,9 @@
 require('dotenv').config();
 const buildApp = require('./src/app');
 const trafficControlService = require('./src/services/trafficControl');
+const xrayConfig = require('./src/services/xrayConfig');
+const xrayShaping = require('./src/services/xrayShaping');
+const xrayAccessLog = require('./src/services/xrayAccessLog');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -22,6 +25,17 @@ async function start() {
     trafficControlService.ensureTrafficControlBase();
   } catch (err) {
     console.error('[trafficControl] bootstrap failed — starting anyway:', err.message);
+  }
+
+  // VLESS speed-tier shaping (ROADMAP_AWG-VLESS.md Этап 1) — only relevant on
+  // dual-protocol nodes that actually run Xray, and must never block AWG.
+  if (xrayConfig.isAvailable()) {
+    try {
+      xrayShaping.ensureVlessShapingBase();
+      xrayAccessLog.start();
+    } catch (err) {
+      console.error('[xrayShaping] bootstrap failed — starting anyway:', err.message);
+    }
   }
 
   const app = await buildApp();
