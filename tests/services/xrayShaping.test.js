@@ -41,7 +41,11 @@ describe('ensureVlessShapingBase', () => {
     expect(spawnSync).toHaveBeenCalledWith('nft', ['delete', 'table', 'inet', 'boonker_vless_shape'], { encoding: 'utf8' });
     const writeCall = fs.writeFileSync.mock.calls[0];
     expect(writeCall[1]).toContain('type ipv4_addr . inet_service : mark');
-    expect(writeCall[1]).toContain('meta mark set ip daddr . tcp sport map @dl_mark');
+    // dport, not sport: for the node->client leg the client's port is the
+    // packet's DESTINATION port (source port is always 443) — a live E2E
+    // throughput test caught this as `sport` first (silently matched
+    // nothing, no throttling at all on download).
+    expect(writeCall[1]).toContain('meta mark set ip daddr . tcp dport map @dl_mark');
     expect(spawnSync).toHaveBeenCalledWith('nft', ['-f', writeCall[0]], { encoding: 'utf8' });
   });
 

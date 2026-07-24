@@ -63,7 +63,15 @@ function ensureNftablesShapingTable() {
     '  }',
     '  chain postrouting {',
     '    type filter hook postrouting priority mangle; policy accept;',
-    '    meta mark set ip daddr . tcp sport map @dl_mark',
+    // For the node->client (download) leg, the client's IP is the packet's
+    // DESTINATION address and the client's ephemeral port is the packet's
+    // DESTINATION port (source port is Xray's fixed listen port, 443, on
+    // every such packet — not useful as a key). Must match what
+    // markClientConnection() inserts: (client_ip, client_port). A `tcp
+    // sport` key here would never match anything, since 443 (the only
+    // sport value that ever appears) isn't a key in the map — found live,
+    // see ROADMAP_AWG-VLESS.md Этап 1 E2E notes.
+    '    meta mark set ip daddr . tcp dport map @dl_mark',
     '  }',
     '}',
   ].join('\n');
