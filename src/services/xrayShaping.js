@@ -41,13 +41,21 @@ function addTierFilter(tier) {
   // `handle` takes a plain decimal fwmark value — confirmed live (tc's own
   // `tc filter show` just displays it back in hex, e.g. 100 -> 0x64).
   const mark = String(speedTiers.markFor(tier));
-  const rate = `${speedTiers.rateMbitFor(tier)}mbit`;
+  const rateMbit = speedTiers.rateMbitFor(tier);
+  const rate = `${rateMbit}mbit`;
+  // A flat 32k burst (fine for AWG's low, fixed default) polices ordinary
+  // TCP bursts far too aggressively at higher VLESS tier rates — found live
+  // via the Этап 1 throughput E2E: even the top tier collapsed to a fraction
+  // of its configured rate once burst-sized packets started getting dropped,
+  // triggering TCP retransmit backoff. ~100ms worth of tokens at the tier's
+  // own rate scales the allowance with it instead.
+  const burstKB = Math.max(32, Math.ceil(rateMbit * 12.5));
 
   removeTierFilter(tier); // idempotent: clear any stale filter at this prio first
 
   sh('tc', ['filter', 'add', 'dev', iface, 'parent', '1:0', 'protocol', 'ip', 'prio', prio,
     'handle', mark, 'fw',
-    'police', 'rate', rate, 'burst', '32k', 'drop', 'flowid', '1:1']);
+    'police', 'rate', rate, 'burst', `${burstKB}k`, 'drop', 'flowid', '1:1']);
 }
 
 function ensureNftablesShapingTable() {

@@ -49,21 +49,34 @@ describe('ensureVlessShapingBase', () => {
     expect(spawnSync).toHaveBeenCalledWith('nft', ['-f', writeCall[0]], { encoding: 'utf8' });
   });
 
-  it('adds a fw-mark police filter per tier at the tier\'s default rate', () => {
+  it('adds a fw-mark police filter per tier at the tier\'s default rate, with a burst scaled to that rate (~100ms worth of tokens)', () => {
+    const { ensureVlessShapingBase } = require('../../src/services/xrayShaping');
+    ensureVlessShapingBase();
+
+    // A flat 32k burst let TCP retransmit storms crush real throughput well
+    // below the configured rate — found live (Этап 1 E2E). ~12.5k per Mbit.
+    expect(spawnSync).toHaveBeenCalledWith('tc', [
+      'filter', 'add', 'dev', 'ens18', 'parent', '1:0', 'protocol', 'ip', 'prio', '60',
+      'handle', '101', 'fw', 'police', 'rate', '10mbit', 'burst', '125k', 'drop', 'flowid', '1:1',
+    ], { encoding: 'utf8' });
+    expect(spawnSync).toHaveBeenCalledWith('tc', [
+      'filter', 'add', 'dev', 'ens18', 'parent', '1:0', 'protocol', 'ip', 'prio', '61',
+      'handle', '103', 'fw', 'police', 'rate', '30mbit', 'burst', '375k', 'drop', 'flowid', '1:1',
+    ], { encoding: 'utf8' });
+    expect(spawnSync).toHaveBeenCalledWith('tc', [
+      'filter', 'add', 'dev', 'ens18', 'parent', '1:0', 'protocol', 'ip', 'prio', '62',
+      'handle', '105', 'fw', 'police', 'rate', '50mbit', 'burst', '625k', 'drop', 'flowid', '1:1',
+    ], { encoding: 'utf8' });
+  });
+
+  it('floors the burst at 32k for a very low custom rate', () => {
+    process.env.VLESS_TIER_1_MBIT = '1';
     const { ensureVlessShapingBase } = require('../../src/services/xrayShaping');
     ensureVlessShapingBase();
 
     expect(spawnSync).toHaveBeenCalledWith('tc', [
       'filter', 'add', 'dev', 'ens18', 'parent', '1:0', 'protocol', 'ip', 'prio', '60',
-      'handle', '101', 'fw', 'police', 'rate', '10mbit', 'burst', '32k', 'drop', 'flowid', '1:1',
-    ], { encoding: 'utf8' });
-    expect(spawnSync).toHaveBeenCalledWith('tc', [
-      'filter', 'add', 'dev', 'ens18', 'parent', '1:0', 'protocol', 'ip', 'prio', '61',
-      'handle', '103', 'fw', 'police', 'rate', '30mbit', 'burst', '32k', 'drop', 'flowid', '1:1',
-    ], { encoding: 'utf8' });
-    expect(spawnSync).toHaveBeenCalledWith('tc', [
-      'filter', 'add', 'dev', 'ens18', 'parent', '1:0', 'protocol', 'ip', 'prio', '62',
-      'handle', '105', 'fw', 'police', 'rate', '50mbit', 'burst', '32k', 'drop', 'flowid', '1:1',
+      'handle', '101', 'fw', 'police', 'rate', '1mbit', 'burst', '32k', 'drop', 'flowid', '1:1',
     ], { encoding: 'utf8' });
   });
 
