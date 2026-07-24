@@ -2,6 +2,7 @@
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const speedTiers = require('./xraySpeedTiers');
+const xrayConfig = require('./xrayConfig');
 
 const NFT_TABLE = 'boonker_vless_shape';
 const NFT_RULESET_PATH = '/tmp/boonker-vless-shape.conf';
@@ -24,23 +25,31 @@ function sh(cmd, args, extraOpts) {
   return result;
 }
 
-function removeTierFilter(tier) {
+// The fw mark IS the filter's prio too — both just need to be unique per
+// user, and re-using one number for both avoids needing a separate
+// prio-allocation scheme on top of xrayConfig's mark allocation.
+function removePeerFilter(mark) {
   const iface = publicIface();
-  const prio = String(speedTiers.prioFor(tier));
+  const prio = String(mark);
   sh('tc', ['filter', 'del', 'dev', iface, 'parent', '1:0', 'protocol', 'ip', 'prio', prio]);
 }
 
-// One filter per tier handles BOTH directions: Xray's own `sockopt.mark` tags
-// the upload leg (outbound to the real site) directly, while the download
-// leg gets the same mark via the `dl_mark` nftables map (see
-// ensureNftablesShapingTable below) — confirmed live, see
-// ROADMAP_AWG-VLESS.md Этап 1.
-function addTierFilter(tier) {
+// One filter PER USER (not per tier) handles BOTH directions: Xray's own
+// `sockopt.mark` tags the upload leg (outbound to the real site) directly via
+// that user's own personal outbound, while the download leg gets the same
+// mark via the `dl_mark` nftables map (see ensureNftablesShapingTable below)
+// — confirmed live, see ROADMAP_AWG-VLESS.md Этап 1. A single filter/police
+// action shared across every user on a tier (the original design) meant N
+// concurrent same-tier users split ONE combined rate limit instead of each
+// getting the tier's rate individually — found live during the Этап 1 audit,
+// not caught by the throughput E2E because it only ever tested one client at
+// a time. One filter per user is the fix: nobody's cap depends on how many
+// other users share their tier.
+function addPeerFilter(mark, tier) {
   const iface = publicIface();
-  const prio = String(speedTiers.prioFor(tier));
+  const prio = String(mark);
   // `handle` takes a plain decimal fwmark value — confirmed live (tc's own
   // `tc filter show` just displays it back in hex, e.g. 100 -> 0x64).
-  const mark = String(speedTiers.markFor(tier));
   const rateMbit = speedTiers.rateMbitFor(tier);
   const rate = `${rateMbit}mbit`;
   // A flat 32k burst (fine for AWG's low, fixed default) polices ordinary
@@ -51,10 +60,10 @@ function addTierFilter(tier) {
   // own rate scales the allowance with it instead.
   const burstKB = Math.max(32, Math.ceil(rateMbit * 12.5));
 
-  removeTierFilter(tier); // idempotent: clear any stale filter at this prio first
+  removePeerFilter(mark); // idempotent: clear any stale filter at this prio first
 
   sh('tc', ['filter', 'add', 'dev', iface, 'parent', '1:0', 'protocol', 'ip', 'prio', prio,
-    'handle', mark, 'fw',
+    'handle', String(mark), 'fw',
     'police', 'rate', rate, 'burst', `${burstKB}k`, 'drop', 'flowid', '1:1']);
 }
 
@@ -105,7 +114,17 @@ function ensureVlessShapingBase() {
 
   ensureNftablesShapingTable();
 
-  for (const tier of speedTiers.listTiers()) addTierFilter(tier);
+  // Re-apply every already-assigned user's filter — covers the interface
+  // being torn down and recreated since this last ran (reboot, xray
+  // reinstall), which wipes all tc state on it, not just the base qdisc
+  // above. Same pattern as trafficControl.js's per-peer reapply loop in
+  // ensureTrafficControlBase(). Non-fatal if xrayConfig can't be read (e.g.
+  // Xray genuinely not installed on this node) — shaping just stays empty.
+  try {
+    for (const peer of xrayConfig.listPeerOutbounds()) addPeerFilter(peer.mark, peer.tier);
+  } catch (err) {
+    console.error('[xrayShaping] failed to re-apply per-user filters:', err.message);
+  }
 }
 
 // Called by the access-log tailer (xrayAccessLog.js) for every newly-accepted
@@ -117,4 +136,4 @@ function markClientConnection(ip, port, mark) {
     `{ ${ip} . ${port} timeout ${DL_MARK_TTL_SECONDS}s : ${mark} }`]);
 }
 
-module.exports = { ensureVlessShapingBase, addTierFilter, removeTierFilter, markClientConnection, DL_MARK_TTL_SECONDS };
+module.exports = { ensureVlessShapingBase, addPeerFilter, removePeerFilter, markClientConnection, DL_MARK_TTL_SECONDS };

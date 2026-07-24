@@ -1,47 +1,38 @@
 'use strict';
 
 // Speed tiers are tied to the existing device-count plan tiers (D4,
-// ROADMAP_AWG-VLESS.md Этап 0) rather than a separate tariff dimension —
-// one mark/outbound per device-tier (1/3/5 devices). Exact Mbit/s numbers are
-// still a pending product decision (D4) — the defaults below are placeholders,
-// tunable via env without a redeploy, same as AWG_PEER_RATE_MBIT already is.
-const TIERS = {
-  1: { mark: 101, prio: 60, envVar: 'VLESS_TIER_1_MBIT', defaultMbit: 10 },
-  3: { mark: 103, prio: 61, envVar: 'VLESS_TIER_3_MBIT', defaultMbit: 30 },
-  5: { mark: 105, prio: 62, envVar: 'VLESS_TIER_5_MBIT', defaultMbit: 50 },
+// ROADMAP_AWG-VLESS.md Этап 0) rather than a separate tariff dimension — a
+// user's tier is derived from their subscription's max_devices (1/3/5).
+// Exact Mbit/s numbers are still a pending product decision (D4) — the
+// defaults below are placeholders, tunable via env without a redeploy, same
+// as AWG_PEER_RATE_MBIT already is.
+//
+// IMPORTANT: the RATE is per-tier, but the fw mark/tc filter is per USER, not
+// per tier — every VLESS user gets their own personal freedom outbound with a
+// unique mark, so their tc police action is never shared with anyone else on
+// the same tier. A single shared mark per tier (the original Этап 1 design)
+// meant every concurrent user on that tier split ONE combined rate limit —
+// found live during audit 2026-07-24, not caught by the throughput E2E
+// because it only ever tested one client at a time.
+const TIER_RATES = {
+  1: { envVar: 'VLESS_TIER_1_MBIT', defaultMbit: 10 },
+  3: { envVar: 'VLESS_TIER_3_MBIT', defaultMbit: 30 },
+  5: { envVar: 'VLESS_TIER_5_MBIT', defaultMbit: 50 },
 };
 
-function getTier(tier) {
-  const t = TIERS[tier];
+function getTierRate(tier) {
+  const t = TIER_RATES[tier];
   if (!t) throw new Error(`Unknown VLESS speed tier: ${tier}`);
   return t;
 }
 
 function listTiers() {
-  return Object.keys(TIERS).map(Number);
-}
-
-function markFor(tier) {
-  return getTier(tier).mark;
-}
-
-function prioFor(tier) {
-  return getTier(tier).prio;
+  return Object.keys(TIER_RATES).map(Number);
 }
 
 function rateMbitFor(tier) {
-  const t = getTier(tier);
+  const t = getTierRate(tier);
   return parseInt(process.env[t.envVar] || String(t.defaultMbit), 10);
-}
-
-// Outbound/rule tags are derived from the mark so config, tc and nft all agree
-// on the same identifier without needing a separate lookup table.
-function outboundTag(tier) {
-  return `tier-${markFor(tier)}`;
-}
-
-function tierForMark(mark) {
-  return listTiers().find((t) => markFor(t) === mark) ?? null;
 }
 
 // Every user gets a stable per-UUID ruleTag so `xray api rmrules` can remove
@@ -51,4 +42,38 @@ function ruleTagFor(uuid) {
   return `user-${uuid}`;
 }
 
-module.exports = { TIERS, listTiers, markFor, prioFor, rateMbitFor, outboundTag, tierForMark, ruleTagFor };
+// Personal per-user outbound tag. Encodes the tier number so a node reboot
+// can re-derive each user's rate (tc filter state is wiped on reboot, this
+// tag persists in config.json's outbounds list) without a separate lookup
+// table, and so an env-var rate change (VLESS_TIER_3_MBIT etc.) takes effect
+// for every tier-3 user on the next wg-manager restart, same as before.
+function peerOutboundTag(tier, uuid) {
+  return `peer-t${tier}-${uuid}`;
+}
+
+const PEER_TAG_RE = /^peer-t(\d+)-(.+)$/;
+
+function parsePeerOutboundTag(tag) {
+  const match = PEER_TAG_RE.exec(String(tag || ''));
+  if (!match) return null;
+  return { tier: parseInt(match[1], 10), uuid: match[2] };
+}
+
+// fw mark / tc prio pool for personal per-user filters — deliberately a
+// different range than anything else already in use (old shared tier marks
+// 101/103/105, AWG's per-peer prio range 2-254 on a different interface
+// entirely) purely to keep `tc filter show`/`nft` output unambiguous during
+// debugging; there's no actual collision risk since VLESS shaping runs on
+// PUBLIC_IFACE while AWG's runs on awg0/ifb0.
+const PEER_MARK_BASE = 2000;
+const PEER_MARK_MAX = 59999;
+
+module.exports = {
+  listTiers,
+  rateMbitFor,
+  ruleTagFor,
+  peerOutboundTag,
+  parsePeerOutboundTag,
+  PEER_MARK_BASE,
+  PEER_MARK_MAX,
+};

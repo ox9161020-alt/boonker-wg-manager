@@ -1,9 +1,11 @@
 'use strict';
 jest.mock('../../src/services/xrayConfig');
 jest.mock('../../src/services/xrayProcess');
+jest.mock('../../src/services/xrayShaping');
 
 const xrayConfig = require('../../src/services/xrayConfig');
 const xrayProcess = require('../../src/services/xrayProcess');
+const xrayShaping = require('../../src/services/xrayShaping');
 
 let app;
 
@@ -88,8 +90,11 @@ describe('POST /api/vless/user/create', () => {
     expect(JSON.parse(res.body).error.code).toBe('VLESS_ERROR');
   });
 
-  it('applies a speed tier when speedTier is provided', async () => {
-    xrayConfig.setUserSpeedTier.mockReturnValue({ ruleTag: 'user-mock-uuid', outboundTag: 'tier-103', mark: 103 });
+  it('applies a speed tier when speedTier is provided — gives the user their OWN outbound + filter', async () => {
+    xrayConfig.setUserSpeedTier.mockReturnValue({
+      ruleTag: 'user-mock-uuid', outboundTag: 'peer-t3-mock-uuid', mark: 2001,
+      created: true, hadPreviousRule: false, oldMark: null, oldTag: null,
+    });
 
     const res = await app.inject({
       method: 'POST', url: '/api/vless/user/create', headers: AUTH,
@@ -99,7 +104,15 @@ describe('POST /api/vless/user/create', () => {
     const body = JSON.parse(res.body);
     expect(body.data.speedTier).toBe(3);
     expect(xrayConfig.setUserSpeedTier).toHaveBeenCalledWith(body.data.uuid, 'user-123 | My Laptop', 3);
-    expect(xrayProcess.addRoutingRuleToRunning).toHaveBeenCalledWith('user-mock-uuid', 'user-123 | My Laptop', 'tier-103');
+    // Fresh outbound (created:true) is hot-added before the routing rule points at it.
+    expect(xrayProcess.addOutboundToRunning).toHaveBeenCalledWith('peer-t3-mock-uuid', 2001);
+    // hadPreviousRule:false — first-ever assignment, nothing live to clear first.
+    expect(xrayProcess.removeRoutingRuleFromRunning).not.toHaveBeenCalled();
+    expect(xrayProcess.addRoutingRuleToRunning).toHaveBeenCalledWith('user-mock-uuid', 'user-123 | My Laptop', 'peer-t3-mock-uuid');
+    // Own personal tc filter, not a shared per-tier one.
+    expect(xrayShaping.addPeerFilter).toHaveBeenCalledWith(2001, 3);
+    expect(xrayProcess.removeOutboundFromRunning).not.toHaveBeenCalled();
+    expect(xrayShaping.removePeerFilter).not.toHaveBeenCalled();
   });
 
   it('does not touch speed-tier routing when speedTier is omitted', async () => {
@@ -155,7 +168,12 @@ describe('POST /api/vless/user/restore', () => {
 
   it('applies a speed tier even when the client already existed — this IS the tier-change path, no fresh UUID needed', async () => {
     xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
-    xrayConfig.setUserSpeedTier.mockReturnValue({ ruleTag: 'user-uuid-aaa', outboundTag: 'tier-105', mark: 105 });
+    // Upgrading from tier 1 (mark 2000) to tier 5 (fresh mark 2002) — a real
+    // tier change, so a previous rule existed AND an old outbound gets freed.
+    xrayConfig.setUserSpeedTier.mockReturnValue({
+      ruleTag: 'user-uuid-aaa', outboundTag: 'peer-t5-uuid-aaa', mark: 2002,
+      created: true, hadPreviousRule: true, oldMark: 2000, oldTag: 'peer-t1-uuid-aaa',
+    });
 
     const res = await app.inject({
       method: 'POST', url: '/api/vless/user/restore', headers: AUTH,
@@ -167,7 +185,37 @@ describe('POST /api/vless/user/restore', () => {
     expect(body.data.speedTier).toBe(5);
     expect(xrayConfig.addClient).not.toHaveBeenCalled();
     expect(xrayConfig.setUserSpeedTier).toHaveBeenCalledWith('uuid-aaa', 'user-123 | My Laptop', 5);
-    expect(xrayProcess.addRoutingRuleToRunning).toHaveBeenCalledWith('user-uuid-aaa', 'user-123 | My Laptop', 'tier-105');
+
+    // New outbound hot-added, live rule cleared before the new one is applied
+    // (adrules -append would otherwise leave a stale tier-1 duplicate that
+    // wins by evaluation order — confirmed live, ROADMAP_AWG-VLESS.md Этап 1).
+    expect(xrayProcess.addOutboundToRunning).toHaveBeenCalledWith('peer-t5-uuid-aaa', 2002);
+    expect(xrayProcess.removeRoutingRuleFromRunning).toHaveBeenCalledWith('user-uuid-aaa');
+    expect(xrayProcess.addRoutingRuleToRunning).toHaveBeenCalledWith('user-uuid-aaa', 'user-123 | My Laptop', 'peer-t5-uuid-aaa');
+    expect(xrayShaping.addPeerFilter).toHaveBeenCalledWith(2002, 5);
+
+    // Old tier-1 outbound + filter are cleaned up, not leaked.
+    expect(xrayProcess.removeOutboundFromRunning).toHaveBeenCalledWith('peer-t1-uuid-aaa');
+    expect(xrayShaping.removePeerFilter).toHaveBeenCalledWith(2000);
+  });
+
+  it('re-asserting the SAME tier clears the stale live rule first but does not touch any outbound/filter', async () => {
+    xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
+    xrayConfig.setUserSpeedTier.mockReturnValue({
+      ruleTag: 'user-uuid-aaa', outboundTag: 'peer-t3-uuid-aaa', mark: 2000,
+      created: false, hadPreviousRule: true, oldMark: null, oldTag: null,
+    });
+
+    await app.inject({
+      method: 'POST', url: '/api/vless/user/restore', headers: AUTH,
+      payload: { uuid: 'uuid-aaa', speedTier: 3 }
+    });
+
+    expect(xrayProcess.addOutboundToRunning).not.toHaveBeenCalled();
+    expect(xrayProcess.removeRoutingRuleFromRunning).toHaveBeenCalledWith('user-uuid-aaa');
+    expect(xrayProcess.addRoutingRuleToRunning).toHaveBeenCalledWith('user-uuid-aaa', 'user-123 | My Laptop', 'peer-t3-uuid-aaa');
+    expect(xrayProcess.removeOutboundFromRunning).not.toHaveBeenCalled();
+    expect(xrayShaping.removePeerFilter).not.toHaveBeenCalled();
   });
 });
 
@@ -202,14 +250,16 @@ describe('DELETE /api/vless/user/:uuid/revoke', () => {
     expect(JSON.parse(res.body).error.code).toBe('VLESS_NOT_AVAILABLE');
   });
 
-  it('also removes the speed-tier routing rule when one exists', async () => {
+  it('also removes the speed-tier routing rule, personal outbound and tc filter when one exists', async () => {
     xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
-    xrayConfig.removeUserSpeedTier.mockReturnValue('user-uuid-aaa');
+    xrayConfig.removeUserSpeedTier.mockReturnValue({ ruleTag: 'user-uuid-aaa', outboundTag: 'peer-t3-uuid-aaa', mark: 2000 });
 
     await app.inject({ method: 'DELETE', url: '/api/vless/user/uuid-aaa/revoke', headers: AUTH });
 
     expect(xrayConfig.removeUserSpeedTier).toHaveBeenCalledWith('uuid-aaa');
     expect(xrayProcess.removeRoutingRuleFromRunning).toHaveBeenCalledWith('user-uuid-aaa');
+    expect(xrayProcess.removeOutboundFromRunning).toHaveBeenCalledWith('peer-t3-uuid-aaa');
+    expect(xrayShaping.removePeerFilter).toHaveBeenCalledWith(2000);
   });
 
   it('skips the hot-remove when the user never had a tier rule', async () => {
@@ -219,6 +269,8 @@ describe('DELETE /api/vless/user/:uuid/revoke', () => {
     await app.inject({ method: 'DELETE', url: '/api/vless/user/uuid-aaa/revoke', headers: AUTH });
 
     expect(xrayProcess.removeRoutingRuleFromRunning).not.toHaveBeenCalled();
+    expect(xrayProcess.removeOutboundFromRunning).not.toHaveBeenCalled();
+    expect(xrayShaping.removePeerFilter).not.toHaveBeenCalled();
   });
 });
 

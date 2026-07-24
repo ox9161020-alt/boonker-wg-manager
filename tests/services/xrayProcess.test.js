@@ -118,6 +118,63 @@ describe('removeRoutingRuleFromRunning', () => {
   });
 });
 
+describe('addOutboundToRunning', () => {
+  it('calls xray api ado with the mini outbound config', () => {
+    spawnSync.mockReturnValue({ stdout: '{}', stderr: '', status: 0, error: null });
+    const writeSpy = jest.spyOn(fs, 'writeFileSync');
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.addOutboundToRunning('peer-t1-uuid-aaa', 2000);
+
+    const call = spawnSync.mock.calls.find((c) => c[1][1] === 'ado');
+    expect(call[0]).toBe('/usr/local/bin/xray');
+    expect(call[1]).toEqual(expect.arrayContaining(['api', 'ado', '--server=127.0.0.1:10085']));
+
+    const written = JSON.parse(writeSpy.mock.calls[0][1]);
+    expect(written).toEqual({
+      outbounds: [{ protocol: 'freedom', tag: 'peer-t1-uuid-aaa', streamSettings: { sockopt: { mark: 2000 } } }],
+    });
+    writeSpy.mockRestore();
+  });
+
+  it('falls back to a full restart when the hot-apply fails', () => {
+    spawnSync
+      .mockReturnValueOnce({ stdout: '', stderr: 'connection refused', status: 1, error: null }) // ado
+      .mockReturnValueOnce({ stdout: '', stderr: '', status: 0, error: null }); // systemctl restart
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.addOutboundToRunning('peer-t1-uuid-aaa', 2000);
+
+    expect(spawnSync).toHaveBeenCalledWith('systemctl', ['restart', 'xray'], { encoding: 'utf8' });
+  });
+});
+
+describe('removeOutboundFromRunning', () => {
+  it('calls xray api rmo with the outbound tag', () => {
+    spawnSync.mockReturnValue({ stdout: '{}', stderr: '', status: 0, error: null });
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.removeOutboundFromRunning('peer-t1-uuid-aaa');
+
+    expect(spawnSync).toHaveBeenCalledWith(
+      '/usr/local/bin/xray',
+      ['api', 'rmo', '--server=127.0.0.1:10085', 'peer-t1-uuid-aaa'],
+      { encoding: 'utf8' }
+    );
+  });
+
+  it('falls back to a full restart when the hot-remove fails', () => {
+    spawnSync
+      .mockReturnValueOnce({ stdout: '', stderr: 'outbound not found', status: 1, error: null }) // rmo
+      .mockReturnValueOnce({ stdout: '', stderr: '', status: 0, error: null }); // systemctl restart
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.removeOutboundFromRunning('peer-t1-uuid-aaa');
+
+    expect(spawnSync).toHaveBeenCalledWith('systemctl', ['restart', 'xray'], { encoding: 'utf8' });
+  });
+});
+
 describe('parseStats', () => {
   it('groups uplink/downlink pairs by email and ignores non-user stats (inbound/system totals)', () => {
     const { parseStats } = require('../../src/services/xrayProcess');

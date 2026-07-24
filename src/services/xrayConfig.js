@@ -97,64 +97,127 @@ function getRealityPublicParams() {
   };
 }
 
-// Idempotently makes sure every speed tier has its marked freedom outbound in
-// the on-disk config — safe to call on every request, and doubles as the
-// backfill path for nodes provisioned before this feature existed (see
-// ROADMAP_AWG-VLESS.md Этап 1).
-function ensureTierOutbounds() {
-  const config = readConfig();
-  config.outbounds = config.outbounds || [];
-  let changed = false;
-  for (const tier of speedTiers.listTiers()) {
-    const tag = speedTiers.outboundTag(tier);
-    if (!config.outbounds.find((o) => o.tag === tag)) {
-      config.outbounds.push({
-        protocol: 'freedom',
-        tag,
-        streamSettings: { sockopt: { mark: speedTiers.markFor(tier) } },
-      });
-      changed = true;
-    }
-  }
-  if (changed) writeConfig(config);
-  return changed;
+function usedMarks(config) {
+  return new Set(
+    (config.outbounds || [])
+      .map((o) => o.streamSettings?.sockopt?.mark)
+      .filter((m) => typeof m === 'number')
+  );
 }
 
-// Assigns (or re-assigns, on an upgrade/downgrade) a user's speed tier by
-// writing a `user`-matched routing rule tagged with their own ruleTag, so it
-// can later be removed in isolation via `xray api rmrules` without touching
-// anyone else's rule or the base api/dns-out rules. Only patches the on-disk
-// file — the caller (xrayProcess) is responsible for hot-applying via
-// `adrules`, exactly like addClientToRunning() does for client adds.
+// Scans existing outbounds for the first free mark in the personal-peer pool
+// — same "scan used values, take the first free one" idiom as config.js's
+// allocateIp() for AWG peer IPs.
+function allocateMark(config) {
+  const used = usedMarks(config);
+  for (let m = speedTiers.PEER_MARK_BASE; m <= speedTiers.PEER_MARK_MAX; m++) {
+    if (!used.has(m)) return m;
+  }
+  throw new Error('No free VLESS speed mark available (range exhausted)');
+}
+
+// Ensures uuid has its own personal freedom outbound for `tier`, allocating a
+// fresh mark only if one doesn't already exist for this exact (tier, uuid)
+// pair. One outbound per USER (not per tier) is the whole point — see
+// xraySpeedTiers.js's header comment for why a shared per-tier mark was
+// wrong. Mutates `config` in place; caller writes it.
+function ensurePeerOutbound(config, uuid, tier) {
+  config.outbounds = config.outbounds || [];
+  const tag = speedTiers.peerOutboundTag(tier, uuid);
+  const existing = config.outbounds.find((o) => o.tag === tag);
+  if (existing) return { tag, mark: existing.streamSettings.sockopt.mark, created: false };
+  const mark = allocateMark(config);
+  config.outbounds.push({ protocol: 'freedom', tag, streamSettings: { sockopt: { mark } } });
+  return { tag, mark, created: true };
+}
+
+// Removes a personal outbound by tag if present, freeing its mark for reuse.
+// Returns the freed mark, or null if the tag wasn't found. Mutates `config`.
+function removePeerOutboundByTag(config, tag) {
+  const outbounds = config.outbounds || [];
+  const idx = outbounds.findIndex((o) => o.tag === tag);
+  if (idx === -1) return null;
+  const mark = outbounds[idx].streamSettings?.sockopt?.mark ?? null;
+  outbounds.splice(idx, 1);
+  return mark;
+}
+
+// Assigns (or re-assigns, on an upgrade/downgrade) a user's speed tier: gives
+// them their own personal freedom outbound (unique mark — never shared with
+// another user, even on the same tier) and a `user`-matched routing rule
+// tagged with their own ruleTag, so it can later be removed in isolation via
+// `xray api rmrules` without touching anyone else's rule or the base
+// api/dns-out rules. Only patches the on-disk file — the caller (vless.js) is
+// responsible for hot-applying via xrayProcess/xrayShaping, exactly like
+// addClientToRunning() does for client adds.
+//
+// `hadPreviousRule` tells the caller whether this uuid already had a LIVE
+// routing rule before this call — `adrules -append` never replaces a
+// same-tagged rule already in the running process's memory (confirmed live,
+// ROADMAP_AWG-VLESS.md Этап 1), so re-asserting or changing a tier must
+// explicitly remove the old live rule first or Xray ends up with a stale
+// duplicate that wins by evaluation order.
 function setUserSpeedTier(uuid, email, tier) {
-  ensureTierOutbounds();
   const config = readConfig();
   const ruleTag = speedTiers.ruleTagFor(uuid);
-  const outboundTag = speedTiers.outboundTag(tier);
+  const newTag = speedTiers.peerOutboundTag(tier, uuid);
+
+  const existingRule = (config.routing.rules || []).find((r) => r.ruleTag === ruleTag);
+  const hadPreviousRule = !!existingRule;
+
+  // Tier changed (upgrade/downgrade) — free the old personal outbound/mark
+  // instead of leaking it forever under a tag nothing points to anymore.
+  let oldMark = null, oldTag = null;
+  if (existingRule && existingRule.outboundTag !== newTag) {
+    oldTag = existingRule.outboundTag;
+    oldMark = removePeerOutboundByTag(config, oldTag);
+  }
+
+  const { tag: outboundTag, mark, created } = ensurePeerOutbound(config, uuid, tier);
   config.routing.rules = (config.routing.rules || []).filter((r) => r.ruleTag !== ruleTag);
   config.routing.rules.push({ type: 'field', user: [email], outboundTag, ruleTag });
   writeConfig(config);
-  return { ruleTag, outboundTag, mark: speedTiers.markFor(tier) };
+  return { ruleTag, outboundTag, mark, created, hadPreviousRule, oldMark, oldTag };
 }
 
-// Returns the ruleTag only if a rule actually existed (null otherwise) so
-// callers don't hot-remove a rule that was never applied — most users won't
-// have a speed tier assigned at all yet, and rmrules on an unknown tag would
-// needlessly trigger the restart fallback in removeRoutingRuleFromRunning().
+// Returns null (no-op signal) when the user never had a tier rule — most
+// users won't have one, and callers shouldn't hot-remove/restart over
+// nothing. Otherwise frees the user's personal outbound/mark and returns
+// enough info for the caller to also hot-remove the live routing rule and
+// tc filter.
 function removeUserSpeedTier(uuid) {
   const config = readConfig();
   const ruleTag = speedTiers.ruleTagFor(uuid);
-  const before = (config.routing.rules || []).length;
-  config.routing.rules = (config.routing.rules || []).filter((r) => r.ruleTag !== ruleTag);
-  if (config.routing.rules.length === before) return null;
+  const rule = (config.routing.rules || []).find((r) => r.ruleTag === ruleTag);
+  if (!rule) return null;
+  const mark = removePeerOutboundByTag(config, rule.outboundTag);
+  config.routing.rules = config.routing.rules.filter((r) => r.ruleTag !== ruleTag);
   writeConfig(config);
-  return ruleTag;
+  return { ruleTag, outboundTag: rule.outboundTag, mark };
+}
+
+// Used by wg-manager's boot sequence (xrayShaping.ensureVlessShapingBase) to
+// re-apply a tc filter for every already-assigned user — tc/nft state is
+// wiped on reboot or interface recreation, config.json (the source of truth)
+// isn't. Tier is recovered from the outbound's own tag, not a separate table.
+function listPeerOutbounds() {
+  const config = readConfig();
+  return (config.outbounds || [])
+    .map((o) => {
+      const parsed = speedTiers.parsePeerOutboundTag(o.tag);
+      if (!parsed) return null;
+      const mark = o.streamSettings?.sockopt?.mark;
+      if (typeof mark !== 'number') return null;
+      return { ...parsed, mark };
+    })
+    .filter(Boolean);
 }
 
 // Used by the access-log tailer (xrayAccessLog.js) to resolve a connection's
-// `email` (from Xray's own "accepted ... email: X" log line) to the fw mark
-// its tier's outbound carries, so the download-direction leg can be marked
-// too — see the D1 research-spike finding in ROADMAP_AWG-VLESS.md Этап 1.
+// `email` (from Xray's own "accepted ... email: X" log line) to the user's
+// OWN personal outbound's fw mark, so the download-direction leg can be
+// marked too — see the D1 research-spike finding in ROADMAP_AWG-VLESS.md
+// Этап 1, and the per-user-mark fix in the same file's Этап 1 audit follow-up.
 function getMarkForEmail(email) {
   const config = readConfig();
   const rule = (config.routing.rules || []).find((r) => Array.isArray(r.user) && r.user.includes(email));
@@ -177,8 +240,8 @@ module.exports = {
   buildEmail,
   parseEmail,
   getRealityPublicParams,
-  ensureTierOutbounds,
   setUserSpeedTier,
   removeUserSpeedTier,
+  listPeerOutbounds,
   getMarkForEmail,
 };

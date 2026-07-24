@@ -122,49 +122,58 @@ describe('buildVlessUri', () => {
   });
 });
 
-describe('ensureTierOutbounds', () => {
-  it('adds the 1/3/5 tier outbounds with their marks when missing', () => {
-    xrayConfig.writeConfig(SAMPLE_CONFIG);
-    const changed = xrayConfig.ensureTierOutbounds();
-
-    expect(changed).toBe(true);
-    const raw = xrayConfig.readConfig();
-    expect(raw.outbounds.find((o) => o.tag === 'tier-101').streamSettings.sockopt.mark).toBe(101);
-    expect(raw.outbounds.find((o) => o.tag === 'tier-103').streamSettings.sockopt.mark).toBe(103);
-    expect(raw.outbounds.find((o) => o.tag === 'tier-105').streamSettings.sockopt.mark).toBe(105);
-  });
-
-  it('is idempotent — does not duplicate outbounds or report a change on a second call', () => {
-    xrayConfig.writeConfig(SAMPLE_CONFIG);
-    xrayConfig.ensureTierOutbounds();
-    const changed = xrayConfig.ensureTierOutbounds();
-
-    expect(changed).toBe(false);
-    const raw = xrayConfig.readConfig();
-    expect(raw.outbounds.filter((o) => o.tag === 'tier-101')).toHaveLength(1);
-  });
-});
-
 describe('setUserSpeedTier / removeUserSpeedTier', () => {
-  it('adds a user-tagged routing rule pointing at the tier outbound', () => {
+  it('gives the user their own personal outbound + mark and a matching routing rule', () => {
     xrayConfig.writeConfig(SAMPLE_CONFIG);
     const result = xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 3);
 
-    expect(result).toEqual({ ruleTag: 'user-uuid-aaa', outboundTag: 'tier-103', mark: 103 });
+    expect(result).toMatchObject({
+      ruleTag: 'user-uuid-aaa', outboundTag: 'peer-t3-uuid-aaa', created: true, hadPreviousRule: false,
+      oldMark: null, oldTag: null,
+    });
+    expect(result.mark).toBeGreaterThanOrEqual(2000);
+
     const raw = xrayConfig.readConfig();
     const rule = raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-aaa');
-    expect(rule).toEqual({ type: 'field', user: ['user-1 | Laptop'], outboundTag: 'tier-103', ruleTag: 'user-uuid-aaa' });
+    expect(rule).toEqual({ type: 'field', user: ['user-1 | Laptop'], outboundTag: 'peer-t3-uuid-aaa', ruleTag: 'user-uuid-aaa' });
+    const outbound = raw.outbounds.find((o) => o.tag === 'peer-t3-uuid-aaa');
+    expect(outbound.streamSettings.sockopt.mark).toBe(result.mark);
   });
 
-  it('replaces the previous rule instead of duplicating it when the tier changes', () => {
+  it('gives two different users on the SAME tier two DIFFERENT marks — no shared pool', () => {
     xrayConfig.writeConfig(SAMPLE_CONFIG);
-    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
-    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 5);
+    const a = xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
+    const b = xrayConfig.setUserSpeedTier('uuid-bbb', 'user-2 | Phone', 1);
+
+    expect(a.mark).not.toBe(b.mark);
+    expect(a.outboundTag).not.toBe(b.outboundTag);
+  });
+
+  it('replaces the previous rule and frees the old personal outbound/mark when the tier changes', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    const first = xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
+    const second = xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 5);
+
+    expect(second.hadPreviousRule).toBe(true);
+    expect(second.oldMark).toBe(first.mark);
+    expect(second.oldTag).toBe('peer-t1-uuid-aaa');
 
     const raw = xrayConfig.readConfig();
     const rules = raw.routing.rules.filter((r) => r.ruleTag === 'user-uuid-aaa');
     expect(rules).toHaveLength(1);
-    expect(rules[0].outboundTag).toBe('tier-105');
+    expect(rules[0].outboundTag).toBe('peer-t5-uuid-aaa');
+    // The old tier-1 outbound is gone — its mark isn't leaked forever.
+    expect(raw.outbounds.find((o) => o.tag === 'peer-t1-uuid-aaa')).toBeUndefined();
+  });
+
+  it('reports hadPreviousRule but no oldMark when re-asserting the SAME tier (idempotent restore)', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 3);
+    const again = xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 3);
+
+    expect(again.hadPreviousRule).toBe(true);
+    expect(again.created).toBe(false);
+    expect(again.oldMark).toBeNull();
   });
 
   it('does not touch other rules (base rules or other users)', () => {
@@ -174,19 +183,20 @@ describe('setUserSpeedTier / removeUserSpeedTier', () => {
 
     const raw = xrayConfig.readConfig();
     expect(raw.routing.rules.find((r) => r.outboundTag === 'api')).toBeDefined();
-    expect(raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-aaa').outboundTag).toBe('tier-101');
-    expect(raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-bbb').outboundTag).toBe('tier-105');
+    expect(raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-aaa').outboundTag).toBe('peer-t1-uuid-aaa');
+    expect(raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-bbb').outboundTag).toBe('peer-t5-uuid-bbb');
   });
 
-  it('removes only the named user\'s rule and returns the ruleTag', () => {
+  it('removes only the named user\'s rule + personal outbound, returning the freed mark', () => {
     xrayConfig.writeConfig(SAMPLE_CONFIG);
-    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
+    const assigned = xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
 
     const removed = xrayConfig.removeUserSpeedTier('uuid-aaa');
 
-    expect(removed).toBe('user-uuid-aaa');
+    expect(removed).toEqual({ ruleTag: 'user-uuid-aaa', outboundTag: 'peer-t1-uuid-aaa', mark: assigned.mark });
     const raw = xrayConfig.readConfig();
     expect(raw.routing.rules.find((r) => r.ruleTag === 'user-uuid-aaa')).toBeUndefined();
+    expect(raw.outbounds.find((o) => o.tag === 'peer-t1-uuid-aaa')).toBeUndefined();
     expect(raw.routing.rules.find((r) => r.outboundTag === 'api')).toBeDefined();
   });
 
@@ -196,12 +206,31 @@ describe('setUserSpeedTier / removeUserSpeedTier', () => {
   });
 });
 
-describe('getMarkForEmail', () => {
-  it('resolves an email to its tier outbound\'s mark', () => {
+describe('listPeerOutbounds', () => {
+  it('lists every personal outbound with its tier and mark, for boot-time tc reapply', () => {
     xrayConfig.writeConfig(SAMPLE_CONFIG);
-    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 5);
+    xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 1);
+    xrayConfig.setUserSpeedTier('uuid-bbb', 'user-2 | Phone', 5);
 
-    expect(xrayConfig.getMarkForEmail('user-1 | Laptop')).toBe(105);
+    const peers = xrayConfig.listPeerOutbounds();
+
+    expect(peers).toHaveLength(2);
+    expect(peers).toContainEqual(expect.objectContaining({ tier: 1, uuid: 'uuid-aaa' }));
+    expect(peers).toContainEqual(expect.objectContaining({ tier: 5, uuid: 'uuid-bbb' }));
+  });
+
+  it('ignores non-peer outbounds (direct, dns-out)', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    expect(xrayConfig.listPeerOutbounds()).toEqual([]);
+  });
+});
+
+describe('getMarkForEmail', () => {
+  it('resolves an email to its own personal outbound\'s mark', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    const assigned = xrayConfig.setUserSpeedTier('uuid-aaa', 'user-1 | Laptop', 5);
+
+    expect(xrayConfig.getMarkForEmail('user-1 | Laptop')).toBe(assigned.mark);
   });
 
   it('returns null when the user has no tier rule', () => {

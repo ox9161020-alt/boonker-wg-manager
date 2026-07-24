@@ -2,6 +2,7 @@
 const crypto = require('crypto');
 const xrayConfig = require('../services/xrayConfig');
 const xrayProcess = require('../services/xrayProcess');
+const xrayShaping = require('../services/xrayShaping');
 const { withLock } = require('../services/lock');
 
 const notAvailable = (reply) => reply.status(503).send({
@@ -10,13 +11,33 @@ const notAvailable = (reply) => reply.status(503).send({
 });
 
 async function vlessRoutes(fastify) {
-  // Applies (or updates, on an upgrade/downgrade) a user's speed-tier routing
-  // rule — used by both create and restore so a tier change never needs a
-  // fresh UUID (ROADMAP_AWG-VLESS.md Этап 1). No-op when speedTier is absent.
+  // Applies (or updates, on an upgrade/downgrade) a user's speed-tier: their
+  // own personal outbound + tc filter (never shared with another user, even
+  // on the same tier — see xraySpeedTiers.js's header comment) and a
+  // `user`-matched routing rule. Used by both create and restore so a tier
+  // change never needs a fresh UUID (ROADMAP_AWG-VLESS.md Этап 1). No-op when
+  // speedTier is absent.
   function applySpeedTier(uuid, email, speedTier) {
     if (speedTier == null) return null;
-    const { ruleTag, outboundTag, mark } = xrayConfig.setUserSpeedTier(uuid, email, speedTier);
+    const { ruleTag, outboundTag, mark, created, hadPreviousRule, oldMark, oldTag } =
+      xrayConfig.setUserSpeedTier(uuid, email, speedTier);
+
+    if (created) xrayProcess.addOutboundToRunning(outboundTag, mark);
+    // adrules -append never replaces a same-tagged rule already live in
+    // Xray's memory (confirmed live, ROADMAP_AWG-VLESS.md Этап 1) — clear the
+    // old one first on a re-assign (tier change, or an idempotent re-confirm
+    // via /restore) so Xray never evaluates a stale duplicate. Skipped on a
+    // genuinely first-ever assignment since there's nothing live to remove.
+    if (hadPreviousRule) xrayProcess.removeRoutingRuleFromRunning(ruleTag);
     xrayProcess.addRoutingRuleToRunning(ruleTag, email, outboundTag);
+
+    xrayShaping.addPeerFilter(mark, speedTier);
+    if (oldMark != null) {
+      // Tier changed — the old personal outbound/filter belongs to nobody
+      // now, clean both up instead of leaking them.
+      xrayProcess.removeOutboundFromRunning(oldTag);
+      xrayShaping.removePeerFilter(oldMark);
+    }
     return { speedTier, mark };
   }
 
@@ -103,8 +124,12 @@ async function vlessRoutes(fastify) {
         if (!existing) throw Object.assign(new Error('VLESS client not found'), { code: 'VLESS_USER_NOT_FOUND' });
         xrayConfig.removeClient(uuid);
         xrayProcess.removeClientFromRunning(xrayConfig.buildEmail(existing.userId, existing.deviceName));
-        const ruleTag = xrayConfig.removeUserSpeedTier(uuid);
-        if (ruleTag) xrayProcess.removeRoutingRuleFromRunning(ruleTag);
+        const removed = xrayConfig.removeUserSpeedTier(uuid);
+        if (removed) {
+          xrayProcess.removeRoutingRuleFromRunning(removed.ruleTag);
+          xrayProcess.removeOutboundFromRunning(removed.outboundTag);
+          xrayShaping.removePeerFilter(removed.mark);
+        }
       });
       return { success: true, data: {} };
     } catch (err) {
