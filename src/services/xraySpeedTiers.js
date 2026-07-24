@@ -14,7 +14,14 @@
 // meant every concurrent user on that tier split ONE combined rate limit —
 // found live during audit 2026-07-24, not caught by the throughput E2E
 // because it only ever tested one client at a time.
+// Tier 0 is not a device-count plan tier — it's the anti-torrent penalty tier
+// (Этап 2, ROADMAP_AWG-VLESS.md): applied by xrayConnLimitPoller.js when a
+// UUID's simultaneous connection count crosses VLESS_PEER_CONNLIMIT, via the
+// exact same setUserSpeedTier()/applySpeedTier() path as a normal plan tier.
+const PENALTY_TIER = 0;
+
 const TIER_RATES = {
+  [PENALTY_TIER]: { envVar: 'VLESS_TIER_PENALTY_MBIT', defaultMbit: 0.5 },
   1: { envVar: 'VLESS_TIER_1_MBIT', defaultMbit: 10 },
   3: { envVar: 'VLESS_TIER_3_MBIT', defaultMbit: 30 },
   5: { envVar: 'VLESS_TIER_5_MBIT', defaultMbit: 50 },
@@ -26,13 +33,17 @@ function getTierRate(tier) {
   return t;
 }
 
+// Product-facing plan tiers only — excludes PENALTY_TIER, which is an
+// internal anti-abuse mechanism, not something a subscription ever grants.
 function listTiers() {
-  return Object.keys(TIER_RATES).map(Number);
+  return Object.keys(TIER_RATES).map(Number).filter((t) => t !== PENALTY_TIER);
 }
 
 function rateMbitFor(tier) {
   const t = getTierRate(tier);
-  return parseInt(process.env[t.envVar] || String(t.defaultMbit), 10);
+  // parseFloat, not parseInt — the penalty tier's 0.5 default would truncate
+  // to 0 (an unlimited/no-op tc rate) with parseInt.
+  return parseFloat(process.env[t.envVar] || String(t.defaultMbit));
 }
 
 // Every user gets a stable per-UUID ruleTag so `xray api rmrules` can remove
@@ -76,4 +87,5 @@ module.exports = {
   parsePeerOutboundTag,
   PEER_MARK_BASE,
   PEER_MARK_MAX,
+  PENALTY_TIER,
 };

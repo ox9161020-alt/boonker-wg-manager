@@ -7,12 +7,17 @@ beforeEach(() => {
   delete process.env.VLESS_TIER_1_MBIT;
   delete process.env.VLESS_TIER_3_MBIT;
   delete process.env.VLESS_TIER_5_MBIT;
+  delete process.env.VLESS_TIER_PENALTY_MBIT;
   speedTiers = require('../../src/services/xraySpeedTiers');
 });
 
 describe('listTiers', () => {
   it('exposes the 1/3/5 device-count tiers (D4: tied to the existing device-tier model)', () => {
     expect(speedTiers.listTiers()).toEqual([1, 3, 5]);
+  });
+
+  it('excludes PENALTY_TIER — it is an anti-abuse mechanism, not a plan a subscription grants', () => {
+    expect(speedTiers.listTiers()).not.toContain(speedTiers.PENALTY_TIER);
   });
 });
 
@@ -31,6 +36,15 @@ describe('rateMbitFor', () => {
 
   it('throws for an unknown tier', () => {
     expect(() => speedTiers.rateMbitFor(2)).toThrow('Unknown VLESS speed tier');
+  });
+
+  it('resolves the penalty tier (0) to a 0.5 Mbit default, not truncated to 0 by parseInt (Этап 2)', () => {
+    expect(speedTiers.rateMbitFor(speedTiers.PENALTY_TIER)).toBe(0.5);
+  });
+
+  it('honours a fractional env override for the penalty tier', () => {
+    process.env.VLESS_TIER_PENALTY_MBIT = '0.25';
+    expect(speedTiers.rateMbitFor(speedTiers.PENALTY_TIER)).toBe(0.25);
   });
 });
 
@@ -55,6 +69,12 @@ describe('peerOutboundTag / parsePeerOutboundTag', () => {
   it('returns null for a tag that is not a personal peer outbound (e.g. direct/dns-out)', () => {
     expect(speedTiers.parsePeerOutboundTag('direct')).toBeNull();
     expect(speedTiers.parsePeerOutboundTag('dns-out')).toBeNull();
+  });
+
+  it('round-trips the penalty tier (0) same as any other tier', () => {
+    const tag = speedTiers.peerOutboundTag(speedTiers.PENALTY_TIER, 'abc-123');
+    expect(tag).toBe('peer-t0-abc-123');
+    expect(speedTiers.parsePeerOutboundTag(tag)).toEqual({ tier: 0, uuid: 'abc-123' });
   });
 });
 

@@ -136,4 +136,7 @@ function markClientConnection(ip, port, mark) {
     `{ ${ip} . ${port} timeout ${DL_MARK_TTL_SECONDS}s : ${mark} }`]);
 }
 
-module.exports = { ensureVlessShapingBase, addPeerFilter, removePeerFilter, markClientConnection, DL_MARK_TTL_SECONDS };
+module.exports = {
+  ensureVlessShapingBase, addPeerFilter, removePeerFilter, markClientConnection,
+  DL_MARK_TTL_SECONDS, NFT_TABLE,
+};

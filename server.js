@@ -5,6 +5,7 @@ const trafficControlService = require('./src/services/trafficControl');
 const xrayConfig = require('./src/services/xrayConfig');
 const xrayShaping = require('./src/services/xrayShaping');
 const xrayAccessLog = require('./src/services/xrayAccessLog');
+const xrayConnLimitPoller = require('./src/services/xrayConnLimitPoller');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -33,6 +34,8 @@ async function start() {
     try {
       xrayShaping.ensureVlessShapingBase();
       xrayAccessLog.start();
+      // Anti-torrent connection-count throttle (ROADMAP_AWG-VLESS.md Этап 2).
+      xrayConnLimitPoller.start();
     } catch (err) {
       console.error('[xrayShaping] bootstrap failed — starting anyway:', err.message);
     }

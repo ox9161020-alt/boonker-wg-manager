@@ -4,12 +4,14 @@ jest.mock('../src/services/trafficControl');
 jest.mock('../src/services/xrayConfig');
 jest.mock('../src/services/xrayShaping');
 jest.mock('../src/services/xrayAccessLog');
+jest.mock('../src/services/xrayConnLimitPoller');
 jest.mock('../src/app');
 
 const trafficControlService = require('../src/services/trafficControl');
 const xrayConfig = require('../src/services/xrayConfig');
 const xrayShaping = require('../src/services/xrayShaping');
 const xrayAccessLog = require('../src/services/xrayAccessLog');
+const xrayConnLimitPoller = require('../src/services/xrayConnLimitPoller');
 const buildApp = require('../src/app');
 
 describe('server startup', () => {
@@ -41,13 +43,14 @@ describe('server startup', () => {
     expect(fakeApp.listen).toHaveBeenCalled();
   });
 
-  it('bootstraps VLESS shaping and starts the access-log tailer when Xray is available on this node', async () => {
+  it('bootstraps VLESS shaping, the access-log tailer and the conn-limit poller when Xray is available on this node', async () => {
     xrayConfig.isAvailable.mockReturnValue(true);
     const { start } = require('../server');
     await start();
 
     expect(xrayShaping.ensureVlessShapingBase).toHaveBeenCalled();
     expect(xrayAccessLog.start).toHaveBeenCalled();
+    expect(xrayConnLimitPoller.start).toHaveBeenCalled();
   });
 
   it('skips VLESS shaping bootstrap entirely on an AWG-only node', async () => {
@@ -57,6 +60,7 @@ describe('server startup', () => {
 
     expect(xrayShaping.ensureVlessShapingBase).not.toHaveBeenCalled();
     expect(xrayAccessLog.start).not.toHaveBeenCalled();
+    expect(xrayConnLimitPoller.start).not.toHaveBeenCalled();
   });
 
   it('still starts listening even if the VLESS shaping bootstrap throws', async () => {
