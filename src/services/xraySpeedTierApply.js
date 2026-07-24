@@ -26,10 +26,21 @@ function applySpeedTier(uuid, email, speedTier) {
   xrayProcess.addRoutingRuleToRunning(ruleTag, email, outboundTag);
 
   xrayShaping.addPeerFilter(mark, speedTier);
-  if (oldMark != null) {
-    // Tier changed — the old personal outbound/filter belongs to nobody
-    // now, clean both up instead of leaking them.
+  if (oldTag != null) {
+    // Tier changed — the old personal outbound belongs to nobody now (a
+    // different tag than the new one, always), clean it up instead of
+    // leaking it in Xray's running process memory.
     xrayProcess.removeOutboundFromRunning(oldTag);
+  }
+  // allocateMark() always hands out the lowest free mark, and the old
+  // outbound's mark was just freed above (in xrayConfig.setUserSpeedTier,
+  // before the new one was allocated) — for a user with no other personal
+  // outbound below it, the new mark is almost always the SAME number as the
+  // old one. Found live (ROADMAP_AWG-VLESS.md Этап 2 E2E): removing "the old
+  // mark's filter" after already adding the new one for that same mark
+  // deleted the filter that was just correctly (re-)applied one line above,
+  // leaving the user completely unthrottled after any solo tier change.
+  if (oldMark != null && oldMark !== mark) {
     xrayShaping.removePeerFilter(oldMark);
   }
   return { speedTier, mark };
