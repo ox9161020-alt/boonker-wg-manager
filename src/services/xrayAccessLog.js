@@ -8,9 +8,15 @@ const xrayShaping = require('./xrayShaping');
 // stdout/journald BY DEFAULT — confirmed live even with `log.access` unset
 // and `log.loglevel: warning` (see ROADMAP_AWG-VLESS.md Этап 1), so tailing
 // journald directly avoids needing a dedicated access-log file + logrotate.
-// Example line (via `journalctl -u xray -o cat`):
+// The `tcp:`/`udp:` prefix before the CLIENT address is inconsistent — Xray
+// omits it for some routed connections and includes it for others (seen
+// live: DNS/dns-out lines carry it, direct-routed ones often don't). Found
+// the hard way during the Этап 1 throughput E2E: a regex that required the
+// prefix silently failed to match plain `from <ip>:<port>` lines, so
+// download shaping never got applied for those connections at all.
 //   2026/07/24 11:28:31.377572 from tcp:46.8.7.197:3467 accepted tcp:host:443 [vless-in >> direct] email: uuid | Device
-const LINE_RE = /from (?:tcp|udp):([\d.]+):(\d+) accepted .*? email: (.+)$/;
+//   2026/07/24 12:43:43.854996 from 194.87.83.183:51114 accepted tcp:host:80 [vless-in -> tier-105] email: uuid | Device
+const LINE_RE = /from (?:(?:tcp|udp):)?([\d.]+):(\d+) accepted .*? email: (.+)$/;
 
 function parseAccessLogLine(line) {
   const match = LINE_RE.exec(line);
