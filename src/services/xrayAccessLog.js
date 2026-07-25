@@ -16,21 +16,31 @@ const xrayShaping = require('./xrayShaping');
 // download shaping never got applied for those connections at all.
 //   2026/07/24 11:28:31.377572 from tcp:46.8.7.197:3467 accepted tcp:host:443 [vless-in >> direct] email: uuid | Device
 //   2026/07/24 12:43:43.854996 from 194.87.83.183:51114 accepted tcp:host:80 [vless-in -> tier-105] email: uuid | Device
-const LINE_RE = /from (?:(?:tcp|udp):)?([\d.]+):(\d+) accepted .*? email: (.+)$/;
+const LINE_RE = /from (?:(?:tcp|udp):)?([\d.]+):(\d+) accepted .*? \[vless-in (?:->|>>) (\S+)\] email: (.+)$/;
 
 function parseAccessLogLine(line) {
   const match = LINE_RE.exec(line);
   if (!match) return null;
-  const [, ip, port, email] = match;
-  return { ip, port: parseInt(port, 10), email: email.trim() };
+  const [, ip, port, outbound, email] = match;
+  return { ip, port: parseInt(port, 10), outbound, email: email.trim() };
 }
 
 let child = null;
 let restartTimer = null;
 
+// DNS lookups (routed to dns-out) are excluded — found live 2026-07-25 while
+// investigating a real device that got anti-torrent-throttled seconds after
+// its very first connection: a phone's full-tunnel reconnect burst generates
+// dozens of DNS queries per second (every app resolving its own hosts), each
+// one a brand-new UDP "connection" with its own ephemeral port. dl_mark was
+// counting all of them, so ordinary phone usage — not torrenting — tripped
+// xrayConnLimitPoller's threshold (confirmed: 30 of 30 recent entries for one
+// real device were `-> dns-out`). DNS bandwidth is negligible for Этап 1's
+// speed shaping either way, so skipping it here costs nothing there while
+// fixing Этап 2's false positives at the source.
 function handleLine(line) {
   const parsed = parseAccessLogLine(line);
-  if (!parsed) return;
+  if (!parsed || parsed.outbound === 'dns-out') return;
   let mark;
   try {
     mark = xrayConfig.getMarkForEmail(parsed.email);
