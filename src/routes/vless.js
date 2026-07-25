@@ -4,6 +4,7 @@ const xrayConfig = require('../services/xrayConfig');
 const xrayProcess = require('../services/xrayProcess');
 const xrayShaping = require('../services/xrayShaping');
 const { applySpeedTier } = require('../services/xraySpeedTierApply');
+const xrayDeviceLimitPoller = require('../services/xrayDeviceLimitPoller');
 const { withLock } = require('../services/lock');
 
 const notAvailable = (reply) => reply.status(503).send({
@@ -13,7 +14,7 @@ const notAvailable = (reply) => reply.status(503).send({
 
 async function vlessRoutes(fastify) {
   fastify.post('/vless/user/create', async (req, reply) => {
-    const { userId, deviceName, speedTier } = req.body || {};
+    const { userId, deviceName, speedTier, maxDevices } = req.body || {};
     if (!userId || !deviceName) {
       return reply.status(400).send({
         success: false,
@@ -29,6 +30,7 @@ async function vlessRoutes(fastify) {
         xrayConfig.addClient(id, userId, deviceName);
         xrayProcess.addClientToRunning(id, email);
         const appliedTier = applySpeedTier(id, email, speedTier);
+        xrayConfig.setMaxDevices(id, maxDevices);
         return { uuid: id, tier: appliedTier };
       });
 
@@ -47,7 +49,7 @@ async function vlessRoutes(fastify) {
   });
 
   fastify.post('/vless/user/restore', async (req, reply) => {
-    const { uuid, userId, deviceName, speedTier } = req.body || {};
+    const { uuid, userId, deviceName, speedTier, maxDevices } = req.body || {};
     if (!uuid) {
       return reply.status(400).send({
         success: false,
@@ -70,6 +72,10 @@ async function vlessRoutes(fastify) {
         // — this IS the tier-change path for an active subscription, no
         // fresh UUID needed (ROADMAP_AWG-VLESS.md Этап 1).
         const appliedTier = applySpeedTier(uuid, email, speedTier);
+        // Same "unconditional, whether new or existing" treatment for the
+        // device limit — a plan upgrade/downgrade changes max_devices without
+        // necessarily going through the suspended/restore branch above.
+        xrayConfig.setMaxDevices(uuid, maxDevices);
         return { restored: !existing, tier: appliedTier };
       });
 
@@ -95,6 +101,7 @@ async function vlessRoutes(fastify) {
         if (!existing) throw Object.assign(new Error('VLESS client not found'), { code: 'VLESS_USER_NOT_FOUND' });
         xrayConfig.removeClient(uuid);
         xrayProcess.removeClientFromRunning(xrayConfig.buildEmail(existing.userId, existing.deviceName));
+        xrayDeviceLimitPoller.clearState(uuid);
         const removed = xrayConfig.removeUserSpeedTier(uuid);
         if (removed) {
           xrayProcess.removeRoutingRuleFromRunning(removed.ruleTag);

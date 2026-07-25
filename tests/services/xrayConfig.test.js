@@ -105,6 +105,30 @@ describe('removeClient', () => {
   });
 });
 
+describe('setMaxDevices', () => {
+  it('persists maxDevices on the matching client and surfaces it via listClients/findClient', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.setMaxDevices('uuid-aaa', 3);
+
+    expect(xrayConfig.findClient('uuid-aaa')).toEqual({ uuid: 'uuid-aaa', userId: 'user-1', deviceName: 'Laptop', maxDevices: 3 });
+    // Untouched client keeps the exact same shape as before (no stray maxDevices: undefined/null).
+    expect(xrayConfig.findClient('uuid-bbb')).toEqual({ uuid: 'uuid-bbb', userId: 'user-2', deviceName: 'Phone' });
+  });
+
+  it('is a no-op when maxDevices is null/undefined', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    xrayConfig.setMaxDevices('uuid-aaa', null);
+    xrayConfig.setMaxDevices('uuid-aaa', undefined);
+
+    expect(xrayConfig.findClient('uuid-aaa')).toEqual({ uuid: 'uuid-aaa', userId: 'user-1', deviceName: 'Laptop' });
+  });
+
+  it('throws when the uuid is not found', () => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+    expect(() => xrayConfig.setMaxDevices('missing-uuid', 3)).toThrow('VLESS client not found');
+  });
+});
+
 describe('buildVlessUri', () => {
   it('builds a vless:// URI from the node\'s Reality env params', () => {
     process.env.SERVER_PUBLIC_IP = '1.2.3.4';

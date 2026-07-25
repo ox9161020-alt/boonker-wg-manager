@@ -40,9 +40,16 @@ function parseEmail(email) {
   return match ? { userId: match[1].trim(), deviceName: match[2].trim() } : { userId: null, deviceName: null };
 }
 
+// maxDevices only appears when set (see setMaxDevices) — keeps the return
+// shape identical to before for clients that never got one, rather than
+// forcing every caller to deal with an explicit null.
 function listClients() {
   const inbound = findVlessInbound(readConfig());
-  return inbound.settings.clients.map((c) => ({ uuid: c.id, ...parseEmail(c.email) }));
+  return inbound.settings.clients.map((c) => ({
+    uuid: c.id,
+    ...parseEmail(c.email),
+    ...(c.maxDevices != null ? { maxDevices: c.maxDevices } : {}),
+  }));
 }
 
 function addClient(uuid, userId, deviceName) {
@@ -63,6 +70,22 @@ function removeClient(uuid) {
 
 function findClient(uuid) {
   return listClients().find((c) => c.uuid === uuid) || null;
+}
+
+// Persists the device/connection-count limit (ROADMAP_AWG-VLESS.md Этап 3,
+// D3 — limit = subscription's max_devices) directly on the client object, the
+// same way `flow`/`email` already live there — an extra field Xray itself
+// simply ignores. No-op on null/undefined (same guard style as
+// xraySpeedTierApply.js's speedTier == null check) so callers can pass
+// whatever backend-api sent without a separate branch.
+function setMaxDevices(uuid, maxDevices) {
+  if (maxDevices == null) return;
+  const config = readConfig();
+  const inbound = findVlessInbound(config);
+  const client = inbound.settings.clients.find((c) => c.id === uuid);
+  if (!client) throw new Error('VLESS client not found');
+  client.maxDevices = maxDevices;
+  writeConfig(config);
 }
 
 function buildVlessUri(uuid, label) {
@@ -236,6 +259,7 @@ module.exports = {
   addClient,
   removeClient,
   findClient,
+  setMaxDevices,
   buildVlessUri,
   buildEmail,
   parseEmail,

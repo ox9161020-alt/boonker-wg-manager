@@ -6,6 +6,7 @@ const xrayConfig = require('./src/services/xrayConfig');
 const xrayShaping = require('./src/services/xrayShaping');
 const xrayAccessLog = require('./src/services/xrayAccessLog');
 const xrayConnLimitPoller = require('./src/services/xrayConnLimitPoller');
+const xrayDeviceLimitPoller = require('./src/services/xrayDeviceLimitPoller');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
@@ -36,6 +37,8 @@ async function start() {
       xrayAccessLog.start();
       // Anti-torrent connection-count throttle (ROADMAP_AWG-VLESS.md Этап 2).
       xrayConnLimitPoller.start();
+      // Device/connection-count limit per UUID (ROADMAP_AWG-VLESS.md Этап 3).
+      xrayDeviceLimitPoller.start();
     } catch (err) {
       console.error('[xrayShaping] bootstrap failed — starting anyway:', err.message);
     }

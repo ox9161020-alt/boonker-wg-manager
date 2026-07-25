@@ -2,10 +2,12 @@
 jest.mock('../../src/services/xrayConfig');
 jest.mock('../../src/services/xrayProcess');
 jest.mock('../../src/services/xrayShaping');
+jest.mock('../../src/services/xrayDeviceLimitPoller');
 
 const xrayConfig = require('../../src/services/xrayConfig');
 const xrayProcess = require('../../src/services/xrayProcess');
 const xrayShaping = require('../../src/services/xrayShaping');
+const xrayDeviceLimitPoller = require('../../src/services/xrayDeviceLimitPoller');
 
 let app;
 
@@ -29,6 +31,7 @@ beforeEach(() => {
   xrayConfig.addClient.mockReturnValue(undefined);
   xrayConfig.removeClient.mockReturnValue(undefined);
   xrayConfig.removeUserSpeedTier.mockReturnValue(null);
+  xrayConfig.setMaxDevices.mockReturnValue(undefined);
   xrayProcess.addClientToRunning.mockReturnValue(undefined);
   xrayProcess.removeClientFromRunning.mockReturnValue(undefined);
 });
@@ -124,6 +127,16 @@ describe('POST /api/vless/user/create', () => {
     expect(xrayConfig.setUserSpeedTier).not.toHaveBeenCalled();
     expect(xrayProcess.addRoutingRuleToRunning).not.toHaveBeenCalled();
   });
+
+  it('persists maxDevices on the new client for the device-limit poller to enforce', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/create', headers: AUTH,
+      payload: { userId: 'user-123', deviceName: 'My Laptop', maxDevices: 3 }
+    });
+
+    const body = JSON.parse(res.body);
+    expect(xrayConfig.setMaxDevices).toHaveBeenCalledWith(body.data.uuid, 3);
+  });
 });
 
 describe('POST /api/vless/user/restore', () => {
@@ -217,6 +230,17 @@ describe('POST /api/vless/user/restore', () => {
     expect(xrayProcess.removeOutboundFromRunning).not.toHaveBeenCalled();
     expect(xrayShaping.removePeerFilter).not.toHaveBeenCalled();
   });
+
+  it('applies maxDevices unconditionally, whether the client was just created or already existed', async () => {
+    xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
+
+    await app.inject({
+      method: 'POST', url: '/api/vless/user/restore', headers: AUTH,
+      payload: { uuid: 'uuid-aaa', maxDevices: 5 }
+    });
+
+    expect(xrayConfig.setMaxDevices).toHaveBeenCalledWith('uuid-aaa', 5);
+  });
 });
 
 describe('DELETE /api/vless/user/:uuid/revoke', () => {
@@ -229,6 +253,7 @@ describe('DELETE /api/vless/user/:uuid/revoke', () => {
     expect(JSON.parse(res.body)).toEqual({ success: true, data: {} });
     expect(xrayConfig.removeClient).toHaveBeenCalledWith('uuid-aaa');
     expect(xrayProcess.removeClientFromRunning).toHaveBeenCalledWith('user-123 | My Laptop');
+    expect(xrayDeviceLimitPoller.clearState).toHaveBeenCalledWith('uuid-aaa');
   });
 
   it('returns 404 when the uuid is not found', async () => {

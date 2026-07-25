@@ -175,6 +175,56 @@ describe('removeOutboundFromRunning', () => {
   });
 });
 
+describe('getOnlineIps', () => {
+  it('calls xray api statsonlineiplist with the email and converts unix seconds to ms', () => {
+    spawnSync.mockReturnValue({
+      stdout: JSON.stringify({ ips: { '46.8.7.197': 1784893666, '10.0.0.5': 1784893700 } }),
+      stderr: '', status: 0, error: null,
+    });
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    const result = xrayProcess.getOnlineIps('user-1 | Laptop');
+
+    expect(spawnSync).toHaveBeenCalledWith(
+      '/usr/local/bin/xray',
+      ['api', 'statsonlineiplist', '--server=127.0.0.1:10085', '-email=user-1 | Laptop'],
+      { encoding: 'utf8' }
+    );
+    expect(result).toEqual([
+      { ip: '46.8.7.197', lastSeenMs: 1784893666000 },
+      { ip: '10.0.0.5', lastSeenMs: 1784893700000 },
+    ]);
+  });
+
+  it('returns an empty array when the email has no online record (non-zero exit)', () => {
+    spawnSync.mockReturnValue({ stdout: '', stderr: 'rpc error: not found', status: 1, error: null });
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    expect(xrayProcess.getOnlineIps('nobody | Phone')).toEqual([]);
+  });
+
+  it('returns an empty array on spawn error instead of throwing', () => {
+    spawnSync.mockReturnValue({ stdout: '', stderr: '', status: null, error: new Error('xray not installed') });
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    expect(xrayProcess.getOnlineIps('user-1 | Laptop')).toEqual([]);
+  });
+
+  it('returns an empty array for malformed JSON instead of throwing', () => {
+    spawnSync.mockReturnValue({ stdout: 'not json', stderr: '', status: 0, error: null });
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    expect(xrayProcess.getOnlineIps('user-1 | Laptop')).toEqual([]);
+  });
+
+  it('returns an empty array when ips is missing from the response', () => {
+    spawnSync.mockReturnValue({ stdout: '{}', stderr: '', status: 0, error: null });
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    expect(xrayProcess.getOnlineIps('user-1 | Laptop')).toEqual([]);
+  });
+});
+
 describe('parseStats', () => {
   it('groups uplink/downlink pairs by email and ignores non-user stats (inbound/system totals)', () => {
     const { parseStats } = require('../../src/services/xrayProcess');

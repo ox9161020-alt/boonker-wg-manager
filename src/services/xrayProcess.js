@@ -203,6 +203,27 @@ function getClientTraffic() {
   return parseStats(queryStats());
 }
 
+// `xray api statsonlineiplist` (ROADMAP_AWG-VLESS.md Этап 3) returns every IP
+// Xray has seen for this email along with the unix timestamp (seconds) of its
+// most recent access — already-confirmed-live per server-nl/xray/README.md,
+// no access-log parsing needed for this. Xray's own retention of stale
+// entries isn't documented/guaranteed, so the caller (xrayDeviceLimitPoller)
+// applies its OWN sliding-window filter against lastSeenMs rather than
+// trusting presence in this list to mean "still connected". A missing/empty
+// record (never connected, or Xray restarted) is not an error — same
+// non-fatal convention as the rest of this file's `xray api` wrappers.
+function getOnlineIps(email) {
+  const result = spawnSync(xrayBin(), ['api', 'statsonlineiplist', `--server=${apiAddr()}`, `-email=${email}`], { encoding: 'utf8' });
+  if (result.error || result.status !== 0) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout || '{}');
+  } catch {
+    return [];
+  }
+  return Object.entries(parsed.ips || {}).map(([ip, unixSeconds]) => ({ ip, lastSeenMs: unixSeconds * 1000 }));
+}
+
 module.exports = {
   addClientToRunning,
   removeClientFromRunning,
@@ -213,4 +234,5 @@ module.exports = {
   removeRoutingRuleFromRunning,
   addOutboundToRunning,
   removeOutboundFromRunning,
+  getOnlineIps,
 };
