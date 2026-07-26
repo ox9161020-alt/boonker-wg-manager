@@ -8,6 +8,10 @@ beforeEach(() => {
   delete process.env.VLESS_TIER_3_MBIT;
   delete process.env.VLESS_TIER_5_MBIT;
   delete process.env.VLESS_TIER_PENALTY_MBIT;
+  delete process.env.VLESS_QUOTA_BAND_0_MBIT;
+  delete process.env.VLESS_QUOTA_BAND_1_MBIT;
+  delete process.env.VLESS_QUOTA_BAND_2_MBIT;
+  delete process.env.VLESS_QUOTA_EXHAUSTED_MBIT;
   speedTiers = require('../../src/services/xraySpeedTiers');
 });
 
@@ -82,5 +86,33 @@ describe('PEER_MARK_BASE / PEER_MARK_MAX', () => {
   it('defines a mark pool disjoint from the old shared tier marks (101/103/105)', () => {
     expect(speedTiers.PEER_MARK_BASE).toBeGreaterThan(105);
     expect(speedTiers.PEER_MARK_MAX).toBeGreaterThan(speedTiers.PEER_MARK_BASE);
+  });
+});
+
+describe('volume-quota tiers (ROADMAP_AWG-VLESS.md — "честная лестница" 2026-07-26)', () => {
+  it('excludes quota-band tiers and the exhausted tier from listTiers (not a plan a subscription grants)', () => {
+    expect(speedTiers.listTiers()).toEqual([1, 3, 5]);
+    for (const t of speedTiers.QUOTA_BAND_TIERS) expect(speedTiers.listTiers()).not.toContain(t);
+    expect(speedTiers.listTiers()).not.toContain(speedTiers.QUOTA_EXHAUSTED_TIER);
+  });
+
+  it('resolves default Mbit rates matching the 2026-07-26 ladder (30/10/1/0.5)', () => {
+    const [band0, band1, band2] = speedTiers.QUOTA_BAND_TIERS;
+    expect(speedTiers.rateMbitFor(band0)).toBe(30);
+    expect(speedTiers.rateMbitFor(band1)).toBe(10);
+    expect(speedTiers.rateMbitFor(band2)).toBe(1);
+    expect(speedTiers.rateMbitFor(speedTiers.QUOTA_EXHAUSTED_TIER)).toBe(0.5);
+  });
+
+  it('honours per-band env overrides independently of PENALTY_TIER, even though defaults happen to match today', () => {
+    process.env.VLESS_QUOTA_EXHAUSTED_MBIT = '0.25';
+    expect(speedTiers.rateMbitFor(speedTiers.QUOTA_EXHAUSTED_TIER)).toBe(0.25);
+    expect(speedTiers.rateMbitFor(speedTiers.PENALTY_TIER)).toBe(0.5); // untouched
+  });
+
+  it('round-trips quota tier tags same as any other tier', () => {
+    const tag = speedTiers.peerOutboundTag(speedTiers.QUOTA_BAND_TIERS[0], 'abc-123');
+    expect(tag).toBe('peer-t100-abc-123');
+    expect(speedTiers.parsePeerOutboundTag(tag)).toEqual({ tier: 100, uuid: 'abc-123' });
   });
 });

@@ -20,11 +20,28 @@
 // exact same setUserSpeedTier()/applySpeedTier() path as a normal plan tier.
 const PENALTY_TIER = 0;
 
+// Volume-quota tiers (ROADMAP_AWG-VLESS.md — "честная лестница" 2026-07-26):
+// applied by backend-api's hourly quota check (not a wg-manager-local poller,
+// unlike PENALTY_TIER/Этап 2) once a device's month-to-date bytes cross a
+// node-configured GB threshold. The THRESHOLDS live in boonker_nodes (DB,
+// read live by backend-api — no restart needed to change them); the RATES
+// below are node-local env, same "needs a wg-manager restart to pick up a
+// change" convention as every other tier here. Deliberately a separate ID
+// range from PENALTY_TIER, even though QUOTA_EXHAUSTED_TIER's default rate
+// (0.5) happens to match PENALTY_TIER's today — keeping them independent
+// means changing one later can't silently change the other.
+const QUOTA_BAND_TIERS = [100, 101, 102]; // one per boonker_nodes.vless_quota_bandN_*
+const QUOTA_EXHAUSTED_TIER = 103; // beyond the last configured band, for the rest of the month
+
 const TIER_RATES = {
   [PENALTY_TIER]: { envVar: 'VLESS_TIER_PENALTY_MBIT', defaultMbit: 0.5 },
   1: { envVar: 'VLESS_TIER_1_MBIT', defaultMbit: 10 },
   3: { envVar: 'VLESS_TIER_3_MBIT', defaultMbit: 30 },
   5: { envVar: 'VLESS_TIER_5_MBIT', defaultMbit: 50 },
+  [QUOTA_BAND_TIERS[0]]: { envVar: 'VLESS_QUOTA_BAND_0_MBIT', defaultMbit: 30 },
+  [QUOTA_BAND_TIERS[1]]: { envVar: 'VLESS_QUOTA_BAND_1_MBIT', defaultMbit: 10 },
+  [QUOTA_BAND_TIERS[2]]: { envVar: 'VLESS_QUOTA_BAND_2_MBIT', defaultMbit: 1 },
+  [QUOTA_EXHAUSTED_TIER]: { envVar: 'VLESS_QUOTA_EXHAUSTED_MBIT', defaultMbit: 0.5 },
 };
 
 function getTierRate(tier) {
@@ -33,10 +50,10 @@ function getTierRate(tier) {
   return t;
 }
 
-// Product-facing plan tiers only — excludes PENALTY_TIER, which is an
-// internal anti-abuse mechanism, not something a subscription ever grants.
+// Product-facing plan tiers only — excludes PENALTY_TIER and the quota-ladder
+// tiers, neither of which is something a subscription itself ever grants.
 function listTiers() {
-  return Object.keys(TIER_RATES).map(Number).filter((t) => t !== PENALTY_TIER);
+  return Object.keys(TIER_RATES).map(Number).filter((t) => t !== PENALTY_TIER && t < 100);
 }
 
 function rateMbitFor(tier) {
@@ -88,4 +105,6 @@ module.exports = {
   PEER_MARK_BASE,
   PEER_MARK_MAX,
   PENALTY_TIER,
+  QUOTA_BAND_TIERS,
+  QUOTA_EXHAUSTED_TIER,
 };

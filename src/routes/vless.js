@@ -118,6 +118,40 @@ async function vlessRoutes(fastify) {
     }
   });
 
+  // Single-purpose speed-tier override, distinct from create/restore: no
+  // maxDevices/lifecycle side effects, so backend-api's hourly volume-quota
+  // check (ROADMAP_AWG-VLESS.md — "честная лестница") can call this every
+  // cycle without touching device-limit state or emitting a misleading
+  // "restored" event for what is really a routine tier re-evaluation, not a
+  // suspend/restore transition.
+  fastify.post('/vless/user/:uuid/speed-tier', async (req, reply) => {
+    const uuid = decodeURIComponent(req.params.uuid);
+    const { speedTier } = req.body || {};
+    if (speedTier == null) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'INVALID_PARAMS', message: 'speedTier is required' }
+      });
+    }
+    if (!xrayConfig.isAvailable()) return notAvailable(reply);
+
+    try {
+      const tier = await withLock(() => {
+        const existing = xrayConfig.findClient(uuid);
+        if (!existing) throw Object.assign(new Error('VLESS client not found'), { code: 'VLESS_USER_NOT_FOUND' });
+        const email = xrayConfig.buildEmail(existing.userId, existing.deviceName);
+        return applySpeedTier(uuid, email, speedTier);
+      });
+
+      return { success: true, data: { uuid, speedTier: tier.speedTier } };
+    } catch (err) {
+      if (err.code === 'VLESS_USER_NOT_FOUND') {
+        return reply.status(404).send({ success: false, error: { code: 'VLESS_USER_NOT_FOUND', message: err.message } });
+      }
+      return reply.status(500).send({ success: false, error: { code: 'VLESS_ERROR', message: err.message } });
+    }
+  });
+
   fastify.get('/vless/users', async (req, reply) => {
     if (!xrayConfig.isAvailable()) return notAvailable(reply);
     try {

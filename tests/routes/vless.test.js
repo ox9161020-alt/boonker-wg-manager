@@ -299,6 +299,61 @@ describe('DELETE /api/vless/user/:uuid/revoke', () => {
   });
 });
 
+describe('POST /api/vless/user/:uuid/speed-tier', () => {
+  it('applies the given tier without touching maxDevices/device-limit state', async () => {
+    xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
+    xrayConfig.setUserSpeedTier.mockReturnValue({
+      ruleTag: 'user-uuid-aaa', outboundTag: 'peer-t100-uuid-aaa', mark: 2000,
+      created: true, hadPreviousRule: false, oldMark: null, oldTag: null,
+    });
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/uuid-aaa/speed-tier', headers: AUTH,
+      payload: { speedTier: 100 }
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.data).toEqual({ uuid: 'uuid-aaa', speedTier: 100 });
+    expect(xrayConfig.setUserSpeedTier).toHaveBeenCalledWith('uuid-aaa', 'user-123 | My Laptop', 100);
+    expect(xrayConfig.setMaxDevices).not.toHaveBeenCalled();
+    expect(xrayDeviceLimitPoller.clearState).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 when speedTier is missing', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/uuid-aaa/speed-tier', headers: AUTH, payload: {}
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(xrayConfig.setUserSpeedTier).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the uuid is not found', async () => {
+    xrayConfig.findClient.mockReturnValue(null);
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/missing-uuid/speed-tier', headers: AUTH,
+      payload: { speedTier: 103 }
+    });
+
+    expect(res.statusCode).toBe(404);
+    expect(JSON.parse(res.body).error.code).toBe('VLESS_USER_NOT_FOUND');
+  });
+
+  it('returns 503 when Xray is not installed on this node', async () => {
+    xrayConfig.isAvailable.mockReturnValue(false);
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/uuid-aaa/speed-tier', headers: AUTH,
+      payload: { speedTier: 100 }
+    });
+
+    expect(res.statusCode).toBe(503);
+    expect(JSON.parse(res.body).error.code).toBe('VLESS_NOT_AVAILABLE');
+  });
+});
+
 describe('GET /api/vless/users', () => {
   it('returns the list of VLESS users', async () => {
     xrayConfig.listClients.mockReturnValue([{ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' }]);
