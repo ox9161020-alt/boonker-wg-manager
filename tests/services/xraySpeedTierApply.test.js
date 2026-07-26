@@ -6,7 +6,7 @@ jest.mock('../../src/services/xrayShaping');
 const xrayConfig = require('../../src/services/xrayConfig');
 const xrayProcess = require('../../src/services/xrayProcess');
 const xrayShaping = require('../../src/services/xrayShaping');
-const { applySpeedTier } = require('../../src/services/xraySpeedTierApply');
+const { applySpeedTier, clearSpeedTier } = require('../../src/services/xraySpeedTierApply');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -43,6 +43,30 @@ it('removes the stale live routing rule first when one already existed (adrules 
 
   expect(xrayProcess.removeRoutingRuleFromRunning).toHaveBeenCalledWith('user-u1');
   expect(xrayProcess.addRoutingRuleToRunning).toHaveBeenCalledWith('user-u1', 'user | Device', 'peer-t1-u1');
+});
+
+describe('clearSpeedTier (ROADMAP_AWG-VLESS.md Этап 6 — device-count tiers retired)', () => {
+  it('tears down the routing rule, outbound, and tc filter when an override existed', () => {
+    xrayConfig.removeUserSpeedTier.mockReturnValue({ ruleTag: 'user-u1', outboundTag: 'peer-t100-u1', mark: 2000 });
+
+    const result = clearSpeedTier('u1');
+
+    expect(result).toEqual({ ruleTag: 'user-u1', outboundTag: 'peer-t100-u1', mark: 2000 });
+    expect(xrayProcess.removeRoutingRuleFromRunning).toHaveBeenCalledWith('user-u1');
+    expect(xrayProcess.removeOutboundFromRunning).toHaveBeenCalledWith('peer-t100-u1');
+    expect(xrayShaping.removePeerFilter).toHaveBeenCalledWith(2000);
+  });
+
+  it('is a harmless no-op when the user never had an override', () => {
+    xrayConfig.removeUserSpeedTier.mockReturnValue(null);
+
+    const result = clearSpeedTier('u1');
+
+    expect(result).toBeNull();
+    expect(xrayProcess.removeRoutingRuleFromRunning).not.toHaveBeenCalled();
+    expect(xrayProcess.removeOutboundFromRunning).not.toHaveBeenCalled();
+    expect(xrayShaping.removePeerFilter).not.toHaveBeenCalled();
+  });
 });
 
 describe('tier change cleanup — regression (ROADMAP_AWG-VLESS.md Этап 2 live E2E)', () => {

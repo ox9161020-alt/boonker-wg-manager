@@ -320,6 +320,39 @@ describe('POST /api/vless/user/:uuid/speed-tier', () => {
     expect(xrayDeviceLimitPoller.clearState).not.toHaveBeenCalled();
   });
 
+  it('clears any override when speedTier is explicitly null (device-count tiers retired, Этап 6)', async () => {
+    xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
+    xrayConfig.removeUserSpeedTier.mockReturnValue({ ruleTag: 'user-uuid-aaa', outboundTag: 'peer-t100-uuid-aaa', mark: 2000 });
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/uuid-aaa/speed-tier', headers: AUTH,
+      payload: { speedTier: null }
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).data).toEqual({ uuid: 'uuid-aaa', speedTier: null });
+    expect(xrayConfig.removeUserSpeedTier).toHaveBeenCalledWith('uuid-aaa');
+    expect(xrayProcess.removeRoutingRuleFromRunning).toHaveBeenCalledWith('user-uuid-aaa');
+    expect(xrayProcess.removeOutboundFromRunning).toHaveBeenCalledWith('peer-t100-uuid-aaa');
+    expect(xrayShaping.removePeerFilter).toHaveBeenCalledWith(2000);
+    expect(xrayConfig.setUserSpeedTier).not.toHaveBeenCalled();
+  });
+
+  it('clearing when there was no override at all is a harmless no-op', async () => {
+    xrayConfig.findClient.mockReturnValue({ uuid: 'uuid-aaa', userId: 'user-123', deviceName: 'My Laptop' });
+    xrayConfig.removeUserSpeedTier.mockReturnValue(null);
+
+    const res = await app.inject({
+      method: 'POST', url: '/api/vless/user/uuid-aaa/speed-tier', headers: AUTH,
+      payload: { speedTier: null }
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(xrayProcess.removeRoutingRuleFromRunning).not.toHaveBeenCalled();
+    expect(xrayProcess.removeOutboundFromRunning).not.toHaveBeenCalled();
+    expect(xrayShaping.removePeerFilter).not.toHaveBeenCalled();
+  });
+
   it('returns 400 when speedTier is missing', async () => {
     const res = await app.inject({
       method: 'POST', url: '/api/vless/user/uuid-aaa/speed-tier', headers: AUTH, payload: {}

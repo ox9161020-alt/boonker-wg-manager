@@ -46,4 +46,21 @@ function applySpeedTier(uuid, email, speedTier) {
   return { speedTier, mark };
 }
 
-module.exports = { applySpeedTier };
+// Fully removes a user's speed-tier override (personal outbound + routing
+// rule + tc filter) — used when a device should go back to being fully
+// unshaped, e.g. the volume quota (ROADMAP_AWG-VLESS.md Этап 6) drops a
+// device back under its free allowance (no fallback subscription tier to
+// reapply — device-count tiers were retired in favor of the quota ladder
+// being the sole speed governor). Distinct from applySpeedTier(uuid, email,
+// null), which is a no-op by design (see above) — this is the actual
+// teardown, same steps vless.js's revoke handler already used inline.
+function clearSpeedTier(uuid) {
+  const removed = xrayConfig.removeUserSpeedTier(uuid);
+  if (!removed) return null;
+  xrayProcess.removeRoutingRuleFromRunning(removed.ruleTag);
+  xrayProcess.removeOutboundFromRunning(removed.outboundTag);
+  xrayShaping.removePeerFilter(removed.mark);
+  return removed;
+}
+
+module.exports = { applySpeedTier, clearSpeedTier };

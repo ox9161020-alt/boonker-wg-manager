@@ -2,8 +2,7 @@
 const crypto = require('crypto');
 const xrayConfig = require('../services/xrayConfig');
 const xrayProcess = require('../services/xrayProcess');
-const xrayShaping = require('../services/xrayShaping');
-const { applySpeedTier } = require('../services/xraySpeedTierApply');
+const { applySpeedTier, clearSpeedTier } = require('../services/xraySpeedTierApply');
 const xrayDeviceLimitPoller = require('../services/xrayDeviceLimitPoller');
 const { withLock } = require('../services/lock');
 
@@ -102,12 +101,7 @@ async function vlessRoutes(fastify) {
         xrayConfig.removeClient(uuid);
         xrayProcess.removeClientFromRunning(xrayConfig.buildEmail(existing.userId, existing.deviceName));
         xrayDeviceLimitPoller.clearState(uuid);
-        const removed = xrayConfig.removeUserSpeedTier(uuid);
-        if (removed) {
-          xrayProcess.removeRoutingRuleFromRunning(removed.ruleTag);
-          xrayProcess.removeOutboundFromRunning(removed.outboundTag);
-          xrayShaping.removePeerFilter(removed.mark);
-        }
+        clearSpeedTier(uuid);
       });
       return { success: true, data: {} };
     } catch (err) {
@@ -123,27 +117,35 @@ async function vlessRoutes(fastify) {
   // check (ROADMAP_AWG-VLESS.md — "честная лестница") can call this every
   // cycle without touching device-limit state or emitting a misleading
   // "restored" event for what is really a routine tier re-evaluation, not a
-  // suspend/restore transition.
+  // suspend/restore transition. `speedTier: null` means "clear any override
+  // entirely" (device-count tiers were retired — there's no fallback
+  // subscription tier to revert to, only "fully unshaped" or "a quota band"),
+  // distinct from the field being missing, which is a client error.
   fastify.post('/vless/user/:uuid/speed-tier', async (req, reply) => {
     const uuid = decodeURIComponent(req.params.uuid);
-    const { speedTier } = req.body || {};
-    if (speedTier == null) {
+    const body = req.body || {};
+    if (!('speedTier' in body)) {
       return reply.status(400).send({
         success: false,
-        error: { code: 'INVALID_PARAMS', message: 'speedTier is required' }
+        error: { code: 'INVALID_PARAMS', message: 'speedTier is required (a tier id, or null to clear)' }
       });
     }
+    const { speedTier } = body;
     if (!xrayConfig.isAvailable()) return notAvailable(reply);
 
     try {
-      const tier = await withLock(() => {
+      const result = await withLock(() => {
         const existing = xrayConfig.findClient(uuid);
         if (!existing) throw Object.assign(new Error('VLESS client not found'), { code: 'VLESS_USER_NOT_FOUND' });
+        if (speedTier === null) {
+          clearSpeedTier(uuid);
+          return { speedTier: null };
+        }
         const email = xrayConfig.buildEmail(existing.userId, existing.deviceName);
         return applySpeedTier(uuid, email, speedTier);
       });
 
-      return { success: true, data: { uuid, speedTier: tier.speedTier } };
+      return { success: true, data: { uuid, speedTier: result.speedTier } };
     } catch (err) {
       if (err.code === 'VLESS_USER_NOT_FOUND') {
         return reply.status(404).send({ success: false, error: { code: 'VLESS_USER_NOT_FOUND', message: err.message } });
