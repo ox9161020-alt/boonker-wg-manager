@@ -3,6 +3,13 @@ const fs = require('fs');
 const speedTiers = require('./xraySpeedTiers');
 
 const VLESS_TAG = 'vless-in';
+const RELAY_OUTBOUND_TAG = 'relay-out';
+const RELAY_RULE_TAG = 'relay-routing';
+// YouTube/Google-video domains detoured through the RF relay (Фаза 3,
+// plans/MULTI_REGION_NODES.md) — deliberately narrow, not `geosite:google`
+// (would also pull Gmail/Диск/Search through the RF hop with unrelated side
+// effects the plan never asked for).
+const RELAY_DOMAINS = ['domain:youtube.com', 'domain:youtu.be', 'domain:googlevideo.com', 'domain:ytimg.com', 'domain:ggpht.com'];
 // Real-world Reality clients (Happ included) default to Vision when importing a
 // Reality profile — an account without this flow gets its connection accepted at
 // the TLS/Reality layer (looks "connected") but immediately ended by Xray at the
@@ -249,9 +256,64 @@ function getMarkForEmail(email) {
   return outbound?.streamSettings?.sockopt?.mark ?? null;
 }
 
+// Persists the RF relay detour outbound (a VLESS client dialing the relay's
+// inbound — see provisioner.js's stepXrayRelay()) + the domain routing rule
+// on disk. Idempotent by tag/ruleTag, same convention as setUserSpeedTier():
+// re-running with a changed host/port/uuid (relay re-provisioned) updates
+// the existing outbound in place instead of erroring on a duplicate tag or
+// leaking a second one. Caller (xrayRelayApply.js) hot-applies afterwards.
+function ensureRelayRouting(host, port, uuid) {
+  const config = readConfig();
+  config.outbounds = config.outbounds || [];
+  config.routing = config.routing || { rules: [] };
+  config.routing.rules = config.routing.rules || [];
+
+  const vnext = [{ address: host, port, users: [{ id: uuid, encryption: 'none' }] }];
+  const existingOutbound = config.outbounds.find((o) => o.tag === RELAY_OUTBOUND_TAG);
+  const wasNew = !existingOutbound;
+  if (existingOutbound) {
+    existingOutbound.settings.vnext = vnext;
+  } else {
+    config.outbounds.push({
+      protocol: 'vless', tag: RELAY_OUTBOUND_TAG,
+      settings: { vnext },
+      streamSettings: { network: 'tcp' },
+    });
+  }
+
+  const hadRule = config.routing.rules.some((r) => r.ruleTag === RELAY_RULE_TAG);
+  if (!hadRule) {
+    config.routing.rules.push({
+      type: 'field', domain: RELAY_DOMAINS, outboundTag: RELAY_OUTBOUND_TAG, ruleTag: RELAY_RULE_TAG,
+    });
+  }
+
+  writeConfig(config);
+  return { outboundTag: RELAY_OUTBOUND_TAG, ruleTag: RELAY_RULE_TAG, domains: RELAY_DOMAINS, wasNew, hadRule };
+}
+
+// Returns null (no-op signal, same convention as removeUserSpeedTier()) when
+// there was nothing to remove.
+function removeRelayRouting() {
+  const config = readConfig();
+  const hadOutbound = (config.outbounds || []).some((o) => o.tag === RELAY_OUTBOUND_TAG);
+  if (!hadOutbound) return null;
+
+  config.outbounds = config.outbounds.filter((o) => o.tag !== RELAY_OUTBOUND_TAG);
+  config.routing = config.routing || { rules: [] };
+  config.routing.rules = (config.routing.rules || []).filter((r) => r.ruleTag !== RELAY_RULE_TAG);
+  writeConfig(config);
+  return { outboundTag: RELAY_OUTBOUND_TAG, ruleTag: RELAY_RULE_TAG };
+}
+
 module.exports = {
   VLESS_TAG,
   CLIENT_FLOW,
+  RELAY_OUTBOUND_TAG,
+  RELAY_RULE_TAG,
+  RELAY_DOMAINS,
+  ensureRelayRouting,
+  removeRelayRouting,
   isAvailable,
   readConfig,
   writeConfig,

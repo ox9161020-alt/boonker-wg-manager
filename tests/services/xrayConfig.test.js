@@ -275,3 +275,57 @@ describe('getRealityPublicParams', () => {
     });
   });
 });
+
+describe('ensureRelayRouting / removeRelayRouting', () => {
+  beforeEach(() => {
+    xrayConfig.writeConfig(SAMPLE_CONFIG);
+  });
+
+  it('adds a relay detour outbound and a domain-matched routing rule', () => {
+    const result = xrayConfig.ensureRelayRouting('81.200.158.86', 443, 'relay-uuid');
+
+    expect(result).toEqual({
+      outboundTag: 'relay-out', ruleTag: 'relay-routing',
+      domains: expect.arrayContaining(['domain:youtube.com', 'domain:googlevideo.com']),
+      wasNew: true, hadRule: false,
+    });
+
+    const config = xrayConfig.readConfig();
+    const outbound = config.outbounds.find((o) => o.tag === 'relay-out');
+    expect(outbound).toEqual({
+      protocol: 'vless', tag: 'relay-out',
+      settings: { vnext: [{ address: '81.200.158.86', port: 443, users: [{ id: 'relay-uuid', encryption: 'none' }] }] },
+      streamSettings: { network: 'tcp' },
+    });
+    expect(config.routing.rules).toContainEqual({
+      type: 'field', domain: xrayConfig.RELAY_DOMAINS, outboundTag: 'relay-out', ruleTag: 'relay-routing',
+    });
+  });
+
+  it('is idempotent — a second call updates the existing outbound instead of duplicating it', () => {
+    xrayConfig.ensureRelayRouting('81.200.158.86', 443, 'relay-uuid-1');
+    const second = xrayConfig.ensureRelayRouting('81.200.158.86', 443, 'relay-uuid-2');
+
+    expect(second.wasNew).toBe(false);
+    expect(second.hadRule).toBe(true);
+
+    const config = xrayConfig.readConfig();
+    expect(config.outbounds.filter((o) => o.tag === 'relay-out')).toHaveLength(1);
+    expect(config.outbounds.find((o) => o.tag === 'relay-out').settings.vnext[0].users[0].id).toBe('relay-uuid-2');
+    expect(config.routing.rules.filter((r) => r.ruleTag === 'relay-routing')).toHaveLength(1);
+  });
+
+  it('removeRelayRouting strips the outbound and the rule', () => {
+    xrayConfig.ensureRelayRouting('81.200.158.86', 443, 'relay-uuid');
+    const removed = xrayConfig.removeRelayRouting();
+
+    expect(removed).toEqual({ outboundTag: 'relay-out', ruleTag: 'relay-routing' });
+    const config = xrayConfig.readConfig();
+    expect(config.outbounds.find((o) => o.tag === 'relay-out')).toBeUndefined();
+    expect(config.routing.rules.find((r) => r.ruleTag === 'relay-routing')).toBeUndefined();
+  });
+
+  it('removeRelayRouting returns null when there was nothing to remove', () => {
+    expect(xrayConfig.removeRelayRouting()).toBeNull();
+  });
+});

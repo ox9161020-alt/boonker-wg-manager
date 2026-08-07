@@ -144,6 +144,45 @@ function runAdo(tmpFile) {
   if (result.status !== 0) throw new Error(result.stderr || 'xray api ado failed');
 }
 
+// Hot-adds the RF relay detour outbound (Фаза 3) — a VLESS client, not a
+// per-user freedom outbound like addOutboundToRunning() above (no mark,
+// different settings shape), so it gets its own `ado` wrapper rather than
+// reusing that one. Same restart-fallback convention as the rest of this file.
+function addRelayOutboundToRunning(tag, host, port, uuid) {
+  const miniConfig = {
+    outbounds: [{
+      protocol: 'vless', tag,
+      settings: { vnext: [{ address: host, port, users: [{ id: uuid, encryption: 'none' }] }] },
+      streamSettings: { network: 'tcp' },
+    }],
+  };
+  const tmpFile = path.join(os.tmpdir(), `xray-ado-relay-${tag}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify(miniConfig), 'utf8');
+  try {
+    runAdo(tmpFile);
+  } catch (err) {
+    restartService();
+  } finally {
+    fs.unlinkSync(tmpFile);
+  }
+}
+
+// Hot-adds the domain -> relay-outbound routing rule (Фаза 3) — domain-matched,
+// not user-matched like addRoutingRuleToRunning() above, so it needs its own
+// `adrules` wrapper (different miniConfig shape).
+function addDomainRoutingRuleToRunning(ruleTag, domains, outboundTag) {
+  const miniConfig = { routing: { rules: [{ type: 'field', domain: domains, outboundTag, ruleTag }] } };
+  const tmpFile = path.join(os.tmpdir(), `xray-adrules-${ruleTag}.json`);
+  fs.writeFileSync(tmpFile, JSON.stringify(miniConfig), 'utf8');
+  try {
+    runAdrules(tmpFile);
+  } catch (err) {
+    restartService();
+  } finally {
+    fs.unlinkSync(tmpFile);
+  }
+}
+
 function removeOutboundFromRunning(tag) {
   try {
     runRmo(tag);
@@ -234,5 +273,7 @@ module.exports = {
   removeRoutingRuleFromRunning,
   addOutboundToRunning,
   removeOutboundFromRunning,
+  addRelayOutboundToRunning,
+  addDomainRoutingRuleToRunning,
   getOnlineIps,
 };

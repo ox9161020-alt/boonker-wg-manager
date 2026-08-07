@@ -5,6 +5,7 @@ const healthRoutes = require('./routes/health');
 const peerRoutes = require('./routes/peer');
 const statusRoutes = require('./routes/status');
 const vlessRoutes = require('./routes/vless');
+const relayRoutes = require('./routes/relay');
 
 async function buildApp() {
   const fastify = Fastify({ logger: process.env.NODE_ENV !== 'test' });
@@ -16,6 +17,7 @@ async function buildApp() {
     api.register(peerRoutes);
     api.register(statusRoutes);
     api.register(vlessRoutes);
+    api.register(relayRoutes);
   }, { prefix: '/api' });
 
   return fastify;

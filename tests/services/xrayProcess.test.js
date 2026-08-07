@@ -255,3 +255,67 @@ describe('parseStats', () => {
     expect(parseStats('')).toEqual([]);
   });
 });
+
+describe('addRelayOutboundToRunning', () => {
+  it('calls xray api ado with a VLESS-client mini outbound config', () => {
+    spawnSync.mockReturnValue({ stdout: '{}', stderr: '', status: 0, error: null });
+    const writeSpy = jest.spyOn(fs, 'writeFileSync');
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.addRelayOutboundToRunning('relay-out', '81.200.158.86', 443, 'relay-uuid');
+
+    const call = spawnSync.mock.calls.find((c) => c[1][1] === 'ado');
+    expect(call[1]).toEqual(expect.arrayContaining(['api', 'ado', '--server=127.0.0.1:10085']));
+
+    const written = JSON.parse(writeSpy.mock.calls[0][1]);
+    expect(written).toEqual({
+      outbounds: [{
+        protocol: 'vless', tag: 'relay-out',
+        settings: { vnext: [{ address: '81.200.158.86', port: 443, users: [{ id: 'relay-uuid', encryption: 'none' }] }] },
+        streamSettings: { network: 'tcp' },
+      }],
+    });
+    writeSpy.mockRestore();
+  });
+
+  it('falls back to a full restart when the hot-apply fails', () => {
+    spawnSync
+      .mockReturnValueOnce({ stdout: '', stderr: 'connection refused', status: 1, error: null }) // ado
+      .mockReturnValueOnce({ stdout: '', stderr: '', status: 0, error: null }); // systemctl restart
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.addRelayOutboundToRunning('relay-out', '81.200.158.86', 443, 'relay-uuid');
+
+    expect(spawnSync).toHaveBeenCalledWith('systemctl', ['restart', 'xray'], { encoding: 'utf8' });
+  });
+});
+
+describe('addDomainRoutingRuleToRunning', () => {
+  it('calls xray api adrules -append with a domain-matched mini routing config', () => {
+    spawnSync.mockReturnValue({ stdout: '{}', stderr: '', status: 0, error: null });
+    const writeSpy = jest.spyOn(fs, 'writeFileSync');
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.addDomainRoutingRuleToRunning('relay-routing', ['domain:youtube.com'], 'relay-out');
+
+    const call = spawnSync.mock.calls.find((c) => c[1][1] === 'adrules');
+    expect(call[1]).toEqual(expect.arrayContaining(['api', 'adrules', '--server=127.0.0.1:10085', '-append']));
+
+    const written = JSON.parse(writeSpy.mock.calls[0][1]);
+    expect(written).toEqual({
+      routing: { rules: [{ type: 'field', domain: ['domain:youtube.com'], outboundTag: 'relay-out', ruleTag: 'relay-routing' }] },
+    });
+    writeSpy.mockRestore();
+  });
+
+  it('falls back to a full restart when the hot-apply fails', () => {
+    spawnSync
+      .mockReturnValueOnce({ stdout: '', stderr: '', status: 1, error: null }) // adrules
+      .mockReturnValueOnce({ stdout: '', stderr: '', status: 0, error: null }); // systemctl restart
+    const xrayProcess = require('../../src/services/xrayProcess');
+
+    xrayProcess.addDomainRoutingRuleToRunning('relay-routing', ['domain:youtube.com'], 'relay-out');
+
+    expect(spawnSync).toHaveBeenCalledWith('systemctl', ['restart', 'xray'], { encoding: 'utf8' });
+  });
+});
