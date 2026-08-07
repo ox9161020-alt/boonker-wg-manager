@@ -11,7 +11,7 @@ beforeEach(() => {
 });
 
 describe('applyRelayRouting', () => {
-  it('adds the outbound then the routing rule on a first-ever apply (no stale rule to clear)', () => {
+  it('adds the outbound then the routing rule on a first-ever apply (nothing stale to clear)', () => {
     xrayConfig.ensureRelayRouting.mockReturnValue({
       outboundTag: 'relay-out', ruleTag: 'relay-routing', domains: ['domain:youtube.com'], wasNew: true, hadRule: false,
     });
@@ -19,19 +19,22 @@ describe('applyRelayRouting', () => {
     const result = applyRelayRouting('81.200.158.86', 443, 'relay-uuid');
 
     expect(xrayConfig.ensureRelayRouting).toHaveBeenCalledWith('81.200.158.86', 443, 'relay-uuid');
+    expect(xrayProcess.removeOutboundFromRunning).not.toHaveBeenCalled();
     expect(xrayProcess.addRelayOutboundToRunning).toHaveBeenCalledWith('relay-out', '81.200.158.86', 443, 'relay-uuid');
     expect(xrayProcess.removeRoutingRuleFromRunning).not.toHaveBeenCalled();
     expect(xrayProcess.addDomainRoutingRuleToRunning).toHaveBeenCalledWith('relay-routing', ['domain:youtube.com'], 'relay-out');
     expect(result).toEqual({ outboundTag: 'relay-out', ruleTag: 'relay-routing', domains: ['domain:youtube.com'] });
   });
 
-  it('clears the stale live rule first when re-applying (adrules -append never replaces)', () => {
+  it('clears the stale live outbound AND rule first when re-applying (regression: ado on a live tag was falling back to a full restart)', () => {
     xrayConfig.ensureRelayRouting.mockReturnValue({
       outboundTag: 'relay-out', ruleTag: 'relay-routing', domains: ['domain:youtube.com'], wasNew: false, hadRule: true,
     });
 
     applyRelayRouting('81.200.158.86', 443, 'relay-uuid-2');
 
+    expect(xrayProcess.removeOutboundFromRunning).toHaveBeenCalledWith('relay-out');
+    expect(xrayProcess.addRelayOutboundToRunning).toHaveBeenCalledWith('relay-out', '81.200.158.86', 443, 'relay-uuid-2');
     expect(xrayProcess.removeRoutingRuleFromRunning).toHaveBeenCalledWith('relay-routing');
     expect(xrayProcess.addDomainRoutingRuleToRunning).toHaveBeenCalledWith('relay-routing', ['domain:youtube.com'], 'relay-out');
   });

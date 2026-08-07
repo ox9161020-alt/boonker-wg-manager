@@ -9,9 +9,20 @@ const xrayProcess = require('./xrayProcess');
 // file-then-hot-apply split as xraySpeedTierApply.js. Idempotent: safe to
 // call again after the relay is re-provisioned with a new host/port/uuid.
 function applyRelayRouting(host, port, uuid) {
-  const { outboundTag, ruleTag, domains, hadRule } = xrayConfig.ensureRelayRouting(host, port, uuid);
+  const { outboundTag, ruleTag, domains, wasNew, hadRule } = xrayConfig.ensureRelayRouting(host, port, uuid);
 
+  // `xray api ado` rejects adding an outbound whose tag is already live —
+  // calling it unconditionally on a re-apply (e.g. clicking "Применить
+  // relay-роутинг" a second time in admin-panel) fell through to
+  // xrayProcess's restart-fallback, which does a full `systemctl restart
+  // xray` and drops every live session on the node (found live 2026-08-07).
+  // Remove-then-add on a re-apply mirrors how the routing rule below already
+  // handles "re-assert with a possibly-changed value" (relay re-provisioned
+  // with a new host/uuid) — skipped only on a genuinely first-ever apply,
+  // where there's nothing live to remove yet.
+  if (!wasNew) xrayProcess.removeOutboundFromRunning(outboundTag);
   xrayProcess.addRelayOutboundToRunning(outboundTag, host, port, uuid);
+
   // adrules -append never replaces a same-tagged rule already live in Xray's
   // memory (confirmed live, ROADMAP_AWG-VLESS.md Этап 1) — clear the old one
   // first on a re-apply so Xray never evaluates a stale duplicate pointing at
