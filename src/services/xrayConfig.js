@@ -9,7 +9,16 @@ const RELAY_RULE_TAG = 'relay-routing';
 // plans/MULTI_REGION_NODES.md) — deliberately narrow, not `geosite:google`
 // (would also pull Gmail/Диск/Search through the RF hop with unrelated side
 // effects the plan never asked for).
-const RELAY_DOMAINS = ['domain:youtube.com', 'domain:youtu.be', 'domain:googlevideo.com', 'domain:ytimg.com', 'domain:ggpht.com'];
+// youtubei.googleapis.com (InnerTube — the API the YouTube app/site actually
+// calls for feed/browse/player data, separate eTLD+1 from youtube.com, so
+// `domain:youtube.com` doesn't cover it) was missing from the original list —
+// found live 2026-08-12 via `journalctl -u xray`: real client traffic to it
+// was going `[vless-in >> direct]`, not through the relay. Фаза 0's own audit
+// already established the ad-or-not decision is embedded in this API's
+// response (ytInitialPlayerResponse's adPlacements/adSlots/playerAds), so
+// missing it here is exactly why ads kept showing in the feed even though
+// googlevideo.com (video bytes) was correctly detoured.
+const RELAY_DOMAINS = ['domain:youtube.com', 'domain:youtu.be', 'domain:googlevideo.com', 'domain:ytimg.com', 'domain:ggpht.com', 'domain:youtubei.googleapis.com'];
 // Real-world Reality clients (Happ included) default to Vision when importing a
 // Reality profile — an account without this flow gets its connection accepted at
 // the TLS/Reality layer (looks "connected") but immediately ended by Xray at the
