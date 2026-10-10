@@ -119,8 +119,18 @@ function clearState(uuid) {
 
 let timer = null;
 
+// Kill switch (2026-10-11): the 10-min window is longer than the 5-min cooldown,
+// so a single Wi-Fi<->mobile roam re-kicks the key right after each restore and
+// causes 10+ min outages for one real device. Set to 0 to disable enforcement
+// without removing the mechanism.
+const isEnabled = () => process.env.VLESS_DEVICE_LIMIT_ENABLED !== '0';
+
 function start() {
   if (timer) return; // already running
+  if (!isEnabled()) {
+    console.error('[xrayDeviceLimitPoller] disabled via VLESS_DEVICE_LIMIT_ENABLED=0');
+    return;
+  }
   timer = setInterval(poll, pollIntervalMs());
   if (timer.unref) timer.unref();
 }

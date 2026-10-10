@@ -165,6 +165,18 @@ describe('start / stop', () => {
     expect(() => poller.stop()).not.toThrow();
   });
 
+  it('does not start when VLESS_DEVICE_LIMIT_ENABLED=0', () => {
+    jest.useFakeTimers();
+    process.env.VLESS_DEVICE_LIMIT_ENABLED = '0';
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    const setIntervalSpy = jest.spyOn(global, 'setInterval');
+
+    poller.start();
+
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+    delete process.env.VLESS_DEVICE_LIMIT_ENABLED;
+  });
+
   it('does not start a second interval if already running', () => {
     jest.useFakeTimers();
     const setIntervalSpy = jest.spyOn(global, 'setInterval');
